@@ -294,6 +294,11 @@ fn checks(k: &mut Kernel) -> u32 {
     serial::write_str("\n[6] what the machine is made of\n");
     serial::write_str("  generations ");
     serial::write_num(k.img.n as i64);
+    serial::write_str(" (root ");
+    serial::write_num(k.img.generation() as i64);
+    serial::write_str(", parent index ");
+    serial::write_num(k.img.gens[k.img.n - 1].parent);
+    serial::write_str(")");
     serial::write_str(", capabilities ");
     serial::write_num(k.img.ncaps as i64);
     serial::write_str(", cons cells ");

@@ -12,6 +12,8 @@ timeout 45 qemu-system-riscv64 \
 sed -n '/=== boot self-test ===/,$p' "$LOG"
 if ! grep -q "=== PASS (failures: 0) ===" "$LOG"; then
     echo "FAILED: boot self-test did not pass" >&2
+    echo "--- qemu output (tail) ---" >&2
+    tail -30 "$LOG" >&2
     exit 1
 fi
 echo "OK: booted, self-test passed"
