@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  boot:
+    # The gate is not "it compiles": it is "it boots and the self-test passes".
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install qemu for riscv64
+        run: sudo apt-get update && sudo -S -p '' apt-get install -y qemu-system-misc
+      - name: Install the bare-metal target
+        run: rustup target add riscv64gc-unknown-none-elf
+      - name: Build and boot
+        run: |
+          chmod +x tools/*.sh
+          tools/check.sh

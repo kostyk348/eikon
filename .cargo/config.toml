@@ -1,0 +1,7 @@
+[build]
+target = "riscv64gc-unknown-none-elf"
+
+[target.riscv64gc-unknown-none-elf]
+# rust-lld takes the linker script directly; -nostartfiles / --no-warn-* are
+# GNU-ld-via-gcc flags and make lld fail, so they are deliberately absent.
+rustflags = ["-C", "link-arg=-Tlinker.ld"]

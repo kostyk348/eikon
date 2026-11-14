@@ -1,0 +1,21 @@
+[package]
+name = "eikon"
+version = "0.1.0"
+edition = "2021"
+description = "A homoiconic kernel: code, data and state are the same form"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "eikon"
+path = "src/main.rs"
+
+# Zero dependencies. A kernel that needs a package manager is not a kernel.
+[dependencies]
+
+[profile.release]
+opt-level = 2
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false
