@@ -1,0 +1,15 @@
+[package]
+name = "eikon-host"
+version = "0.1.0"
+edition = "2021"
+
+# The core of eikon, compiled for the machine that runs the tests: no QEMU, no
+# hardware, no emulator in the loop. Same source files, different edge.
+[[bin]]
+name = "eikon-host"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+overflow-checks = true

@@ -147,6 +147,28 @@ tools/persist.sh          # две загрузки на одном диске: 
 С диском: `-drive file=disk.img,format=raw,if=none,id=d0 -device virtio-blk-device,drive=d0`.
 Ноль зависимостей: `[dependencies]` пуст, `cargo build --offline` проходит без предупреждений.
 
+## Две цели сборки
+
+Один и тот же код (значения, читатель, печататель, вычислитель, компилятор, образ) собирается дважды:
+
+```text
+tools/check.sh   # ядро под RISC-V в QEMU: загрузка + 45 проверок
+tools/host.sh    # то же ядро как программа Linux: 13 проверок + фаззинг
+tools/host.sh fuzz 20000   # 20k случайных входов в читатель, 20k случайных форм на print->read
+```
+
+Хостед-сборка — не эмулятор и не «урезанное ядро»: это те же исходники под `x86_64-unknown-linux-gnu`,
+где трап-хендлер, планировщик, диск и гость заменены заглушками, которые честно отвечают
+`ENOSYS`/`ENODEV`. Взамен парсер и вычислитель попадают под обычный отладчик, `overflow-checks` и
+фаззер — за секунды вместо часов в QEMU. Ловит всё, что живёт в значениях и формах; не видит ничего,
+что живёт в трапах, стеке и железе.
+
+```text
+=== PASS (0 failures) ===
+parser fuzz: 20000 inputs, 0 panics
+roundtrip fuzz: 20000 forms, 0 mismatches
+```
+
 ## Раскладка
 
 ```text
@@ -161,6 +183,7 @@ src/virtio.rs    virtio-mmio block: legacy и modern, опросом, без п�
 src/sched.rs     контракты: EDF, замер обещания, счётчик нарушений
 src/serial.rs    16550 UART: единственный драйвер ввода-вывода
 src/user.rs      гость: ELF-загрузчик, вход в U-mode, обслуживание syscall'ов
+host/           ядро как программа Linux: те же модули + заглушки, фаззинг
 user/hello/      сам гость: no_std-бинарь, syscall'ы по номерам Linux
 assets/hello.elf его ELF, вшитый в ядро через include_bytes!
 src/main.rs      загрузка, самопроверка, REPL

@@ -31,3 +31,17 @@ jobs:
           tools/build-user.sh
       - name: Build and boot
         run: tools/check.sh
+
+  host:
+    # The same core, compiled for the machine that runs the tests: no QEMU in
+    # the loop, so the parser and the evaluator can be fuzzed in seconds.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hosted self-test (x86_64)
+        run: |
+          chmod +x tools/*.sh
+          tools/host.sh
+      - name: Fuzz the reader and the print/read invariant
+        run: tools/host.sh fuzz 20000

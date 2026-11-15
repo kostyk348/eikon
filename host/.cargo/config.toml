@@ -1,0 +1,5 @@
+# The repository's root .cargo/config.toml pins the bare-metal target; this
+# crate is the same core built for the machine that runs the tests, so it
+# overrides the target back to the host.
+[build]
+target = "x86_64-unknown-linux-gnu"
