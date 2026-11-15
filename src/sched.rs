@@ -10,6 +10,7 @@
 // broken promise is counted and named. Silence is the one thing a scheduler must
 // not do about a broken promise.
 
+use crate::image::Kernel;
 use crate::val::Val;
 
 /// One millisecond at the 10 MHz timebase: preempt often enough to see it.
@@ -24,6 +25,40 @@ pub const MAX_TASKS: usize = 4;
 /// level costs kilobytes, and 128 KiB was not enough - the task ran off the
 /// bottom of its stack into the heap and corrupted the values it was reading.
 pub const STACK: usize = 1024 * 1024;
+
+pub const POLICY_KEEP: u8 = 0;
+pub const POLICY_CANCEL: u8 = 1;
+pub const POLICY_RETRY: u8 = 2;
+
+/// Set what happens to a task that misses its deadline. Returns the old policy.
+/// Start a fresh batch: the task table is empty again, and so are the books.
+/// The policy is deliberately kept - it is a decision about the machine, not
+/// about one run.
+pub fn reset() {
+    let s = sched();
+    s.tasks = [Task::empty(); MAX_TASKS];
+    s.n = 0;
+    s.cur = -1;
+    s.idle_sp = 0;
+    s.ticks = 0;
+    s.preemptions = 0;
+    s.misses = 0;
+    s.failed = false;
+    s.n_started = 0;
+    s.n_finished = 0;
+    s.start_order = [-1; MAX_TASKS];
+    s.finish_order = [-1; MAX_TASKS];
+    s.by_deadline = 0;
+    s.cancelled = 0;
+    s.retries = 0;
+}
+
+pub fn set_policy(p: u8) -> u8 {
+    let s = sched();
+    let old = s.policy;
+    s.policy = p;
+    old
+}
 const CANARY: u64 = 0xfeed_face_dead_beef;
 
 #[derive(Clone, Copy)]
@@ -42,6 +77,11 @@ pub struct Task {
     pub finished: bool,
     pub missed: bool,
     pub took_ms: u64,
+    /// The budget the task is judged against right now. A retry raises it.
+    pub budget_ms: u64,
+    pub cancelled: bool,
+    pub retried: bool,
+    pub runs: u64,
 }
 
 impl Task {
@@ -58,6 +98,10 @@ impl Task {
             finished: false,
             missed: false,
             took_ms: 0,
+            budget_ms: 0,
+            cancelled: false,
+            retried: false,
+            runs: 0,
         }
     }
 }
@@ -80,6 +124,11 @@ pub struct Sched {
     /// Times a task that could still make its deadline was running and the
     /// scheduler handed the CPU to an even tighter one.
     pub by_deadline: u64,
+    /// What to do with a task that missed: 0 keep (it still runs), 1 cancel,
+    /// 2 retry once with a bigger budget.
+    pub policy: u8,
+    pub cancelled: u64,
+    pub retries: u64,
 }
 
 impl Task {
@@ -104,6 +153,9 @@ impl Sched {
             finish_order: [-1; MAX_TASKS],
             n_finished: 0,
             by_deadline: 0,
+            policy: 0,
+            cancelled: 0,
+            retries: 0,
         }
     }
 
@@ -133,6 +185,7 @@ impl Sched {
             func,
             sp: sp as u64,
             spawn_tick: crate::trap::now(),
+            budget_ms: deadline_ms,
             ..Task::empty()
         };
         self.n += 1;
@@ -145,7 +198,7 @@ impl Sched {
     fn abs_deadline(&self, i: usize) -> u64 {
         let t = &self.tasks[i];
         let base = if t.started != 0 { t.started } else { t.spawn_tick };
-        base.saturating_add(t.deadline_ms.saturating_mul(10_000))
+        base.saturating_add(t.budget_ms.saturating_mul(10_000))
     }
 
     /// Earliest deadline first - with the part that makes it a *policy* and not
@@ -162,7 +215,7 @@ impl Sched {
         let mut late_dl = u64::MAX;
         let mut i = 0;
         while i < self.n {
-            if !self.tasks[i].finished {
+            if !self.tasks[i].finished && !self.tasks[i].cancelled {
                 let dl = self.abs_deadline(i);
                 if now <= dl {
                     if dl < live_dl {
@@ -228,6 +281,34 @@ impl Sched {
         }
 
         let now = crate::trap::now();
+
+        // A broken contract is a decision, not a statistic. At the tick where
+        // the deadline has passed: cancel the task, or give it one retry with a
+        // bigger budget. "keep" (the default) only counts it and lets it run.
+        if self.cur >= 0 {
+            let i = self.cur as usize;
+            let t = self.tasks[i];
+            if !t.finished && !t.cancelled && now > self.abs_deadline(i) {
+                if self.policy == POLICY_CANCEL {
+                    self.tasks[i].cancelled = true;
+                    self.cancelled += 1;
+                } else if self.policy == POLICY_RETRY && !t.retried {
+                    #[allow(function_casts_as_integer)]
+                    // fresh frame on a fresh stack top: the old context is
+                    // abandoned, so one stack per task is still enough
+                    let entry: usize = task_entry as usize;
+                    let sp = crate::trap::new_task_frame(stack_top(i), entry);
+                    self.tasks[i].sp = sp as u64;
+                    self.tasks[i].retried = true;
+                    self.tasks[i].budget_ms = t.budget_ms.saturating_mul(8);
+                    self.tasks[i].started = 0;
+                    self.tasks[i].spawn_tick = now;
+                    self.tasks[i].slices = 0;
+                    self.retries += 1;
+                }
+            }
+        }
+
         let next = self.pick(now);
         if next < 0 {
             self.cur = -1;
@@ -306,6 +387,10 @@ pub extern "C" fn task_entry() -> ! {
         let i = cur as usize;
         let func = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*p).tasks[i].func)) };
         let started = crate::trap::now();
+        unsafe {
+            let r = core::ptr::read_volatile(core::ptr::addr_of!((*p).tasks[i].runs));
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).tasks[i].runs), r + 1);
+        }
         let k = unsafe { &*core::ptr::addr_of!(crate::KERNEL) };
         let res = crate::eval::apply(k, func, &[]);
         let ok = res.is_ok();
@@ -320,7 +405,8 @@ pub extern "C" fn task_entry() -> ! {
 
         let p = sched_ptr();
         unsafe {
-            let deadline = core::ptr::read_volatile(core::ptr::addr_of!((*p).tasks[i].deadline_ms));
+            // judged against the budget in force, which a retry may have raised
+            let deadline = core::ptr::read_volatile(core::ptr::addr_of!((*p).tasks[i].budget_ms));
             core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).tasks[i].took_ms), took);
             let missed = took > deadline;
             core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).tasks[i].missed), missed);
@@ -352,7 +438,8 @@ fn all_finished() -> bool {
     let mut i = 0;
     while i < n {
         let f = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*p).tasks[i].finished)) };
-        if !f {
+        let c = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*p).tasks[i].cancelled)) };
+        if !f && !c {
             return false;
         }
         i += 1;
@@ -368,32 +455,81 @@ pub fn start() {
         let k = unsafe { &*core::ptr::addr_of!(crate::KERNEL) };
         k.heap.set_floor(k.heap.mark());
     }
-        crate::trap::init();
+    crate::trap::init();
     unsafe { crate::trap::SWITCH = Some(dispatch) };
     crate::trap::arm_timer(TICK);
     crate::trap::enable_timer_irq();
 
-
-    // Run until every task is finished. Not `wfi`: a tick that interrupts the
-    // `wfi` itself leaves sepc pointing at it, so the trampoline returns to the
-    // same `wfi` and the boot context sleeps forever. Spinning, with interrupts
-    // enabled, means the handler can always preempt this loop and the loop
-    // itself decides when there is nothing left to do.
-        loop {
+    // Run until every task is finished or cancelled. Not `wfi`: a tick that
+    // interrupts the `wfi` itself leaves sepc pointing at it, so the trampoline
+    // returns to the same `wfi` and the boot context sleeps forever.
+    loop {
         if all_finished() {
             break;
         }
         core::hint::spin_loop();
     }
-        crate::trap::disable_timer_irq();
-        // every task is finished: the whole arena may be reclaimed again
+    crate::trap::disable_timer_irq();
+
     {
         let k = unsafe { &*core::ptr::addr_of!(crate::KERNEL) };
+        // The outcome becomes a value in the generation chain: a broken promise
+        // that only lives in a counter is a promise nobody can audit.
+        let _ = commit_report(k);
         // Only the floor goes: rewinding here would free the cells the globals
         // and the root still point at, and the next form would read garbage.
         k.heap.set_floor(0);
     }
+}
+
+fn mk_list(k: &Kernel, items: &[Val]) -> Result<Val, &'static str> {
+    let mut out = Val::Nil;
+    let mut i = items.len();
+    while i > 0 {
+        i -= 1;
+        out = k.heap.cons(items[i], out)?;
     }
+    Ok(out)
+}
+
+/// `(report (t <i> <verdict> <promised> <took> <slices>) ...)`, one row per
+/// task, newest generation. Verdicts are `kept`, `missed`, `cancelled` or
+/// `retried`.
+fn commit_report(k: &Kernel) -> Result<u64, &'static str> {
+    let tag = k.heap.intern("report")?;
+    let t_sym = k.heap.intern("t")?;
+    let s = sched();
+    let mut items = Val::Nil;
+    let mut i = s.n;
+    while i > 0 {
+        i -= 1;
+        let t = s.tasks[i];
+        let verdict = if t.cancelled {
+            "cancelled"
+        } else if t.missed {
+            "missed"
+        } else if t.retried {
+            "retried"
+        } else {
+            "kept"
+        };
+        let v = k.heap.intern(verdict)?;
+        let row = mk_list(
+            k,
+            &[
+                Val::Sym(t_sym),
+                Val::Int(i as i64),
+                Val::Sym(v),
+                Val::Int(t.budget_ms as i64),
+                Val::Int(t.took_ms as i64),
+                Val::Int(t.slices as i64),
+            ],
+        )?;
+        items = k.heap.cons(row, items)?;
+    }
+    let form = k.heap.cons(Val::Sym(tag), items)?;
+    k.img.commit(form)
+}
 
 /// Trap-handler entry point: pure function of the current scheduler state.
 fn dispatch(sp: u64) -> u64 {

@@ -172,7 +172,7 @@ pub fn is_prim(name: &str) -> bool {
     matches!(
         name,
         "+" | "-" | "*" | "<" | "=" | "cons" | "car" | "cdr" | "list" | "len"
-            | "spawn" | "sched-run" | "misses" | "save" | "load"
+            | "spawn" | "sched-run" | "misses" | "policy" | "save" | "load"
     )
 }
 
@@ -277,6 +277,21 @@ fn prim(k: &Kernel, name: &'static str, args: &[Val]) -> Result<Val, &'static st
             Ok(Val::Int(crate::sched::sched().misses as i64))
         }
         "misses" => Ok(Val::Int(crate::sched::sched().misses as i64)),
+        "policy" => {
+            if args.len() != 1 {
+                return Err("EINVAL: (policy keep|cancel|retry)");
+            }
+            let p = match args[0] {
+                Val::Sym(s) => match k.heap.sym_name(s) {
+                    "keep" => crate::sched::POLICY_KEEP,
+                    "cancel" => crate::sched::POLICY_CANCEL,
+                    "retry" => crate::sched::POLICY_RETRY,
+                    _ => return Err("EINVAL: policy is keep, cancel or retry"),
+                },
+                _ => return Err("EINVAL: policy takes a symbol"),
+            };
+            Ok(Val::Int(crate::sched::set_policy(p) as i64))
+        }
         "save" => Ok(Val::Int(crate::store::save(k)? as i64)),
         "load" => match crate::store::load(k)? {
             Some(g) => Ok(Val::Int(g as i64)),

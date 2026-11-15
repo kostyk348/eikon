@@ -87,6 +87,39 @@ fn sym(k: &Kernel, s: &'static str) -> Val {
 }
 
 /// Read and evaluate a source string in the global environment.
+
+/// Count rows with this verdict in the root form. The report is a value, so it
+/// can be read back like any other value - that is the point of making it one.
+fn verdict_count(k: &Kernel, want: &str) -> usize {
+    let root = k.img.root();
+    let mut n = 0;
+    if !matches!(root, Val::Cons(_)) {
+        return 0;
+    }
+    let mut items = match k.heap.cdr(root) {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+    while let Val::Cons(_) = items {
+        if let Ok(row) = k.heap.car(items) {
+            if let Ok(rest) = k.heap.cdr(row) {
+                if let Ok(rest2) = k.heap.cdr(rest) {
+                    if let Ok(Val::Sym(s)) = k.heap.car(rest2) {
+                        if k.heap.sym_name(s) == want {
+                            n += 1;
+                        }
+                    }
+                }
+            }
+        }
+        items = match k.heap.cdr(items) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+    }
+    n
+}
+
 fn eval_str(k: &Kernel, src: &'static str) -> Result<Val, &'static str> {
     let mut r = read::Reader::new(src);
     let mut forms = r.all(&k.heap)?;
@@ -490,6 +523,51 @@ fn checks(k: &Kernel) -> u32 {
     serial::write_str(", decisions by deadline: ");
     serial::write_num(s.by_deadline as i64);
     serial::write_str("\n");
+
+    // (b) a broken contract as a decision: cancel
+    sched::reset();
+    let _ = eval_str(k, "(policy 'cancel)");
+    let gen_before = k.img.generation();
+    let sp2 = eval_str(k, r#"(spawn "doomed" 1 (lambda () (fib 17)))"#);
+    let ran2 = eval_str(k, "(sched-run)");
+    let s2 = sched::sched();
+    c.check(
+        "cancel: a task that missed is stopped, not just counted",
+        sp2.is_ok() && ran2.is_ok() && s2.tasks[0].cancelled && !s2.tasks[0].finished,
+    );
+    c.check(
+        "cancel: it was dropped close to its deadline, not after finishing",
+        s2.cancelled == 1 && s2.tasks[0].slices < 6 && s2.tasks[0].took_ms == 0,
+    );
+    c.check(
+        "cancel: the outcome was published as a generation",
+        k.img.generation() == gen_before + 1 && verdict_count(k, "cancelled") == 1,
+    );
+
+    // (c) a broken contract as a second chance: one retry, eight times the budget
+    sched::reset();
+    let _ = eval_str(k, "(policy 'retry)");
+    let sp3 = eval_str(k, r#"(spawn "retry-me" 1 (lambda () (fib 14)))"#);
+    let ran3 = eval_str(k, "(sched-run)");
+    let s3 = sched::sched();
+    c.check(
+        "retry: the task ran twice - the second time with a bigger budget",
+        sp3.is_ok() && ran3.is_ok() && s3.retries == 1 && s3.tasks[0].runs == 2,
+    );
+    c.check(
+        "retry: the second budget was enough, so the promise was kept",
+        s3.tasks[0].finished && !s3.tasks[0].missed && s3.tasks[0].budget_ms == 8,
+    );
+    c.check(
+        "retry: the report says so, and it is readable as a form",
+        verdict_count(k, "retried") == 1 || verdict_count(k, "kept") == 1,
+    );
+    serial::write_str("  last report (the root, printed): ");
+    if let Ok(rendered) = eval_str(k, "(print (root))") {
+        let _ = rendered;
+    }
+    serial::write_str("\n");
+    let _ = eval_str(k, "(policy 'keep)");
 
     serial::write_str("\n[9] what the machine is made of\n");
     serial::write_str("  generations ");
