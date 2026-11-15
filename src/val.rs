@@ -26,7 +26,7 @@ pub enum Val {
     Cap(u64),
 }
 
-pub const CONS_POOL: usize = 1 << 15;
+pub const CONS_POOL: usize = 1 << 16; // 1 MiB of cells; the arena is the memory model
 pub const SYM_POOL: usize = 256;
 pub const STR_POOL: usize = 128;
 pub const CLOS_POOL: usize = 128;

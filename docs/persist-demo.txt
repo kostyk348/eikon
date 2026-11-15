@@ -1,0 +1,12 @@
+=== boot 1: commit a form and save the image ===
+eikon repl. type forms; (quit) leaves.
+> (commit (list 'plant 42 7))
+=> 6
+> (save)
+=> 12
+> qemu-system-riscv64: terminating on signal 15 from pid 25321 (timeout)
+=== boot 2: the same disk, nothing typed ===
+virtio-blk: 8192 sectors
+image restored from disk: generation 1
+
+=== boot self-test ===

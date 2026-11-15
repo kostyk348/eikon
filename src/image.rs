@@ -125,6 +125,8 @@ pub struct Kernel {
     pub ncodes: usize,
     pub consts: [Val; crate::bytecode::MAX_CONSTS],
     pub nconsts: usize,
+    pub blk: crate::virtio::Blk,
+    pub sched: crate::sched::Sched,
 }
 
 impl Kernel {
@@ -136,6 +138,8 @@ impl Kernel {
             ncodes: 0,
             consts: [Val::Nil; crate::bytecode::MAX_CONSTS],
             nconsts: 0,
+            blk: crate::virtio::Blk::none(),
+            sched: crate::sched::Sched::new(),
         }
     }
 }

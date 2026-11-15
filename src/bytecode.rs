@@ -34,7 +34,6 @@ pub enum Op {
     Cons,
     Car,
     Cdr,
-    List(u8),
     Len,
     Return,
 }
@@ -96,7 +95,6 @@ impl<'a> Emitter<'a> {
         let saved = self.ci;
         self.ci = idx;
         let mut body_cur = body;
-        let mut first = true;
         loop {
             if !matches!(body_cur, Val::Cons(_)) {
                 break;
@@ -108,8 +106,6 @@ impl<'a> Emitter<'a> {
                 self.push(Op::Pop)?;
             } else {
                 self.comp(form)?;
-                first = false;
-                let _ = first;
                 break;
             }
             body_cur = more;
@@ -436,18 +432,6 @@ pub fn run(k: &mut Kernel, ci: u16, env: Val) -> Result<Val, &'static str> {
                 let v = stack[sp - 1];
                 stack[sp - 1] = k.heap.cdr(v)?;
             }
-            Op::List(n) => {
-                let n = n as usize;
-                let mut out = NIL;
-                let mut i = 0;
-                while i < n {
-                    out = k.heap.cons(stack[sp - n + i], out)?;
-                    i += 1;
-                }
-                sp -= n;
-                stack[sp] = out;
-                sp += 1;
-            }
             Op::Len => {
                 let v = stack[sp - 1];
                 stack[sp - 1] = Val::Int(k.heap.list_len(v) as i64);
@@ -460,5 +444,5 @@ pub fn run(k: &mut Kernel, ci: u16, env: Val) -> Result<Val, &'static str> {
 /// Every function that is a value rather than a binding.
 pub fn callable_prim(name: &str) -> bool {
     crate::eval::is_prim(name)
-        || matches!(name, "commit" | "root" | "gen" | "rollback" | "cap" | "open" | "print" | "audit")
+        || matches!(name, "commit" | "root" | "gen" | "rollback" | "cap" | "open" | "print" | "audit" | "save" | "load" | "spawn" | "sched-run" | "misses")
 }

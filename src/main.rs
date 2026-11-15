@@ -18,6 +18,9 @@
 
 mod bytecode;
 mod eval;
+mod sched;
+mod store;
+mod virtio;
 mod image;
 mod print;
 mod read;
@@ -263,6 +266,18 @@ fn checks(k: &mut Kernel) -> u32 {
     let fib_form = list2(k, fib_sym, Val::Int(12));
     let mark = k.heap.mark();
 
+    // control: one evaluation with no rewind at all. If this differs from the
+    // loop below by two orders of magnitude, the loop is measuring the arena,
+    // not the interpreter - and that is worth knowing before trusting a number.
+    let tc0 = serial::ticks();
+    let single = eval::eval(k, NIL, fib_form);
+    let tc1 = serial::ticks().saturating_sub(tc0);
+    serial::write_str("  control: one (fib 12) without rewind: ");
+    serial::write_num((tc1 / 10) as i64);
+    serial::write_str(" us (");
+    serial::write_str(if matches!(single, Ok(v) if is_int(v, 144)) { "correct" } else { "WRONG" });
+    serial::write_str(")\n");
+
     // tree-walk
     let t0 = serial::ticks();
     let mut acc = NIL;
@@ -322,14 +337,14 @@ fn checks(k: &mut Kernel) -> u32 {
     let calls: u64 = 50 * 465;
     serial::write_str("  (fib 12) x50 = 23k calls\n");
     serial::write_str("    tree-walk : ");
-    serial::write_num((tw_fib / 100) as i64);
+    serial::write_num((tw_fib / 10_000) as i64);
     serial::write_str(" ms, ");
     if tw_fib > 0 {
         serial::write_num((calls * 10_000_000 / tw_fib) as i64);
     }
     serial::write_str(" calls/s\n");
     serial::write_str("    bytecode  : ");
-    serial::write_num((bc_fib / 100) as i64);
+    serial::write_num((bc_fib / 10_000) as i64);
     serial::write_str(" ms, ");
     if bc_fib > 0 {
         serial::write_num((calls * 10_000_000 / bc_fib) as i64);
@@ -357,7 +372,84 @@ fn checks(k: &mut Kernel) -> u32 {
     c.check("bytecode is faster on call-heavy code", bc_fib < tw_fib);
     c.check("bytecode stays within 20% on a one-form workload", bc_sum <= tw_sum + tw_sum / 5);
 
-    serial::write_str("\n[7] what the machine is made of\n");
+    serial::write_str("\n[7] the image on disk: generations survive a reboot\n");
+    if !k.blk.ok {
+        serial::write_str("  SKIP no block device (add: -drive file=disk.img,format=raw,if=none,id=d0 \\\n");
+        serial::write_str("       -device virtio-blk-device,drive=d0)\n");
+    } else {
+        serial::write_str("  disk capacity: ");
+        serial::write_num(k.blk.capacity as i64);
+        serial::write_str(" sectors\n");
+        match store::save(k) {
+            Ok(bytes) => {
+                c.check("the root form is written to the disk", bytes > 0);
+                let before = k.img.generation();
+                match store::load(k) {
+                    Ok(Some(_gen)) => {
+                        c.check("the image reads back and parses", true);
+                        c.check(
+                            "what came back is what was saved",
+                            same(k, k.img.root(), k.img.gens[k.img.n - 2].root),
+                        );
+                        let _ = before;
+                    }
+                    Ok(None) => c.check("the image reads back and parses", false),
+                    Err(e) => {
+                        serial::write_str("  load error: ");
+                        serial::write_str(e);
+                        serial::write_str("\n");
+                        c.check("the image reads back and parses", false);
+                    }
+                }
+            }
+            Err(e) => {
+                serial::write_str("  save error: ");
+                serial::write_str(e);
+                serial::write_str("\n");
+                c.check("the root form is written to the disk", false);
+            }
+        }
+    }
+
+    serial::write_str("\n[8] contracts: what was promised against what it cost\n");
+    let spawned = eval_str(
+        k,
+        r#"(spawn "miss" 1 (lambda () (fib 14)))
+(spawn "fit" 200 (lambda () (fib 10)))
+(spawn "wide" 5000 (lambda () (fib 12)))"#,
+    );
+    c.check("three tasks spawned", spawned.is_ok() && k.sched.n == 3);
+    let misses = eval_str(k, "(sched-run)");
+    c.check("the queue runs without error", misses.is_ok());
+    let order = k.sched.order();
+    c.check(
+        "earliest deadline runs first",
+        order[0] != usize::MAX && k.sched.tasks[order[0]].deadline_ms == 1,
+    );
+    c.check(
+        "a task that keeps its promise is not blamed",
+        !k.sched.tasks[1].missed && k.sched.tasks[2].missed == false,
+    );
+    c.check(
+        "a broken promise is counted",
+        k.sched.tasks[0].missed && k.sched.misses == 1,
+    );
+    let mut i = 0;
+    while i < k.sched.n {
+        let t = k.sched.tasks[i];
+        serial::write_str("  ");
+        serial::write_str(t.name);
+        serial::write_str(": promised ");
+        serial::write_num(t.deadline_ms as i64);
+        serial::write_str(" ms, took ");
+        serial::write_num(t.took_ms as i64);
+        serial::write_str(" ms -> ");
+        serial::write_str(if t.missed { "MISSED" } else { "kept" });
+        serial::write_str("\n");
+        i += 1;
+    }
+
+    serial::write_str("\n[9] what the machine is made of\n");
     serial::write_str("  generations ");
     serial::write_num(k.img.n as i64);
     serial::write_str(" (root ");
@@ -497,6 +589,29 @@ pub extern "C" fn kernel_main(hartid: usize, _dtb: usize) -> ! {
     let k = unsafe { &mut *core::ptr::addr_of_mut!(KERNEL) };
     // fixed seed on purpose: the same boot must produce the same image
     k.img.secret = 0x5eed_1234_abcd_9876 ^ (hartid as u64);
+
+    k.blk = virtio::Blk::init();
+    if k.blk.ok {
+        serial::write_str("virtio-blk: ");
+        serial::write_num(k.blk.capacity as i64);
+        serial::write_str(" sectors\n");
+        match store::load(k) {
+            Ok(Some(gen)) => {
+                serial::write_str("image restored from disk: generation ");
+                serial::write_num(gen as i64);
+                serial::write_str("\n");
+            }
+            Ok(None) => serial::write_str("disk has no image yet\n"),
+            Err(e) => {
+                serial::write_str("disk image unreadable: ");
+                serial::write_str(e);
+                serial::write_str("\n");
+            }
+        }
+    } else {
+        serial::write_str("virtio-blk: not present (booting without a disk)\n");
+        virtio::Blk::probe();
+    }
 
     serial::write_str("\n=== boot self-test ===\n");
     let failed = checks(k);

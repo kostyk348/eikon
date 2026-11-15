@@ -169,7 +169,11 @@ fn eval_body(k: &mut Kernel, env: Val, mut body: Val) -> Result<Val, &'static st
 }
 
 pub fn is_prim(name: &str) -> bool {
-    matches!(name, "+" | "-" | "*" | "<" | "=" | "cons" | "car" | "cdr" | "list" | "len")
+    matches!(
+        name,
+        "+" | "-" | "*" | "<" | "=" | "cons" | "car" | "cdr" | "list" | "len"
+            | "spawn" | "sched-run" | "misses" | "save" | "load"
+    )
 }
 
 pub fn truthy(v: Val) -> bool {
@@ -250,16 +254,40 @@ fn prim(k: &mut Kernel, name: &'static str, args: &[Val]) -> Result<Val, &'stati
             crate::serial::write_str("\n");
             Ok(args[0])
         }
-        "audit" => {
-            let mut out = NIL;
-            let mut i = 0;
-            while i < k.img.n {
-                let id = k.img.gens[i].id as i64;
-                out = k.heap.cons(Val::Int(id), out)?;
-                i += 1;
+        // ---- contracts, not priorities -------------------------------
+        "spawn" => {
+            if args.len() != 3 {
+                return Err("EINVAL: (spawn name deadline-ms fn)");
             }
-            Ok(out)
+            let name: &'static str = match args[0] {
+                Val::Str(i) => k.heap.strs[i as usize],
+                Val::Sym(s) => k.heap.sym_name(s),
+                _ => return Err("EINVAL: task name must be a string or symbol"),
+            };
+            let deadline = match args[1] {
+                Val::Int(ms) if ms >= 0 => ms as u64,
+                _ => return Err("EINVAL: deadline must be a non-negative integer (ms)"),
+            };
+            Ok(Val::Int(k.sched.spawn(name, deadline, args[2])? as i64))
         }
+        "sched-run" => {
+            // the scheduler needs &mut Kernel (to call the tasks) while it is a
+            // field of it: move it out for the run and put it back
+            let mut sched = core::mem::replace(&mut k.sched, crate::sched::Sched::new());
+            let res = sched.run_all(k);
+            let misses = sched.misses;
+            let runs = sched.runs;
+            k.sched = core::mem::replace(&mut sched, crate::sched::Sched::new());
+            k.sched.runs = runs;
+            res?;
+            Ok(Val::Int(misses as i64))
+        }
+        "misses" => Ok(Val::Int(k.sched.misses as i64)),
+        "save" => Ok(Val::Int(crate::store::save(k)? as i64)),
+        "load" => match crate::store::load(k)? {
+            Some(g) => Ok(Val::Int(g as i64)),
+            None => Err("ENOENT: no image on disk"),
+        },
         "+" | "-" | "*" | "<" | "=" => {
             if args.len() != 2 {
                 return Err("EINVAL: binary primitive");

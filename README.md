@@ -2,15 +2,21 @@
 
 **Гомоиконичное ядро: образ — это программа, программа — это образ.**
 
-Ядро под RISC-V, которое загружается под OpenSBI в QEMU без своего бутлоадера, без крейтов, без
-аллокатора, без MMU. Внутри — один тип значения: форма. Код — форма, состояние — форма, ошибка — форма,
-capability — форма. Печатание формы и чтение её обратно — это интерфейс ядра, а не отладочный вывод.
+Ядро под RISC-V, загружается под OpenSBI в QEMU без своего бутлоадера, без крейтов, без аллокатора, без
+MMU. Внутри — один тип значения: форма. Код — форма, состояние — форма, ошибка — форма, capability —
+форма. Печать и чтение формы — интерфейс ядра, а не отладочный вывод.
+
+Живое: **REPL по serial**, **компилятор в байткод** (в 2,2 раза быстрее обхода дерева на вызовах),
+**генерации на диске** (virtio-blk, переживают перезагрузку), **планировщик контрактов** (EDF + учёт
+нарушенных обещаний).
 
 ```text
 $ tools/run.sh
 eikon 0.1.0 - a homoiconic kernel
 the image is the program; the program is the image
 hart 0, riscv64, no mmu, no allocator, no crates
+virtio-blk: 8192 sectors
+image restored from disk: generation 1
 
 === boot self-test ===
 [1] the image is text, and text is the image
@@ -20,18 +26,56 @@ hart 0, riscv64, no mmu, no allocator, no crates
   PASS (fact 10) = 3628800
   PASS (fib 15) = 610
   PASS (sq 7) = 49 (closure)
-[3] state is a form: commit, audit, rollback
+[3] the same forms, compiled: bytecode runs the boot image
+  PASS compiled (fact 10) = 3628800
+  PASS compiled (fib 15) = 610
+  PASS compiled (sq 7) = 49
+[4] state is a form: commit, audit, rollback
   PASS rollback republishes the old root
-[4] authority is a capability, not a number
+[5] authority is a capability, not a number
   PASS a forged handle is refused
-[5] speed: a form on one hart, no MMU, no cache tricks
-  PASS (fib 12) = 144, measured 50 times
-  (+ 1 2) x20000: 2739050 forms/s
+[6] speed: tree-walk against bytecode, same forms
+  (fib 12) x50 = 23k calls
+    tree-walk : 46 ms, 501607 calls/s
+    bytecode  : 21 ms, 1094102 calls/s
+[7] the image on disk: generations survive a reboot
+  PASS what came back is what was saved
+[8] contracts: what was promised against what it cost
+  PASS earliest deadline runs first
+  PASS a broken promise is counted
+  miss: promised 1 ms, took 4 ms -> MISSED
+  fit: promised 200 ms, took 0 ms -> kept
+
 === PASS (failures: 0) ===
 ```
 
-Полный лог загрузки — [`docs/boot-log.txt`](docs/boot-log.txt). Проверка одной командой: `tools/check.sh`
+30 проверок, все зелёные: [`docs/boot-log.txt`](docs/boot-log.txt). Гейт одной командой: `tools/check.sh`
 (собирает, загружает, падает, если самопроверка не прошла).
+
+## Что уже работает
+
+| | |
+|---|---|
+| **REPL** | `tools/repl.sh program.eikon` — формы читаются, исполняются, печатаются: `(sq 11) → 121`, `(commit …) → 6`, `(audit) → (5 3 2 1)`, ошибки как `! EINVAL: integer expected` |
+| **Два движка** | обход дерева и компилятор в байткод; замыкание хранит и формы, и код, поэтому движки могут вызывать функции друг друга |
+| **Скорость** | `(fib 12)`: 501k вызовов/с обходом, **1,09M вызовов/с** байткодом; `(+ 1 2)`: 3,3M форм/с у обоих (QEMU TCG, один hart) |
+| **Поколения** | `commit` / `audit` / `rollback` / `root` / `gen` — старое поколение остаётся адресуемым |
+| **Диск** | virtio-blk (legacy и modern): `(save)` пишет образ, следующая загрузка печатает `image restored from disk: generation N` |
+| **Власть** | capability handle, выкованный секретом ядра; подделка отвергается |
+| **Контракты** | `(spawn "имя" deadline-ms fn)` + `(sched-run)`: порядок по ближайшему дедлайну, честный счётчик нарушенных обещаний |
+
+Диск пережил перезагрузку — `tools/persist.sh`, лог в [`docs/persist-demo.txt`](docs/persist-demo.txt):
+
+```text
+=== boot 1: commit a form and save the image ===
+> (commit (list 'plant 42 7))
+=> 6
+> (save)
+=> 12
+=== boot 2: the same disk, nothing typed ===
+virtio-blk: 8192 sectors
+image restored from disk: generation 1
+```
 
 ## Что это за штука
 
@@ -49,45 +93,52 @@ hart 0, riscv64, no mmu, no allocator, no crates
 единственные две вещи, которые наши собственные работы (документное состояние, контракты, доказательства)
 показали как необходимые.
 
-## Сборка и запуск
+## Сборка, запуск, доказательства
 
-Нужны: `rustc` с таргетом `riscv64gc-unknown-none-elf`, `qemu-system-riscv64`.
+Нужны `rustc` с таргетом `riscv64gc-unknown-none-elf` и `qemu-system-riscv64`:
 
 ```text
 rustup target add riscv64gc-unknown-none-elf
-tools/run.sh      # собрать и загрузить
-tools/check.sh    # загрузить и проверить, что самопроверка зелёная
+tools/run.sh              # собрать и загрузить
+tools/check.sh            # загрузить и потребовать 'PASS (failures: 0)' (код возврата)
+tools/repl.sh prog.eikon  # прогнать файл форм через REPL
+tools/persist.sh          # две загрузки на одном диске: образ пережил перезагрузку
 ```
 
-Ни одной зависимости: `[dependencies]` в `Cargo.toml` пуст, `cargo build --offline` проходит.
+С диском: `-drive file=disk.img,format=raw,if=none,id=d0 -device virtio-blk-device,drive=d0`.
+Ноль зависимостей: `[dependencies]` пуст, `cargo build --offline` проходит без предупреждений.
 
 ## Раскладка
 
 ```text
-src/val.rs     значение и куча (арена, интернирование, mark/rewind)
-src/read.rs    текст -> форма
-src/print.rs   форма -> текст (канонический, единственное написание)
-src/eval.rs    вычислитель: форма на входе, форма на выходе
-src/image.rs   поколения, commit/rollback, capability
-src/serial.rs  16550 UART: единственный драйвер
-src/main.rs    загрузка, самопроверка, точка входа
+src/val.rs       значение и куча: арена, интернирование, mark/rewind
+src/read.rs      текст -> форма
+src/print.rs     форма -> текст (канонический: одно написание на значение)
+src/eval.rs      обход дерева: форма на входе, форма на выходе
+src/bytecode.rs  компилятор в линейный код + стековая VM
+src/image.rs     поколения, commit/rollback/audit, capability
+src/store.rs     образ на диске: печать формы в секторы и обратно
+src/virtio.rs    virtio-mmio block: legacy и modern, опросом, без прерываний
+src/sched.rs     контракты: EDF, замер обещания, счётчик нарушений
+src/serial.rs    16550 UART: единственный драйвер ввода-вывода
+src/main.rs      загрузка, самопроверка, REPL
 ```
 
 ## Чего здесь нет (честно)
 
-MMU и адресных пространств, многозадачности и прерываний (один hart, один поток, `wfi` в конце),
-диска и сети, пользовательского режима, чисел с плавающей точкой, строк переменной длины, сборщика
-мусора (только арена и `rewind`), компилятора в байткод (только обход дерева), REPL (только образ при
-загрузке). Подробнее — `ARCHITECTURE.md`, раздел «Что не построено».
+- **MMU и адресных пространств**: адреса физические, изоляции процессов нет.
+- **Прерываний и вытеснения**: планировщик непревентивный — задача идёт до конца; контракт пока
+  *измеряется после факта*, а не ограничивает исполнение. Это записано и в `ARCHITECTURE.md`.
+- Пользовательского режима, сети, чисел с плавающей точкой, строк переменной длины.
+- Сборщика мусора: только арена и `rewind` (в неизменяемой модели это и есть сборка).
+- Очередей ввода-вывода: один запрос за раз, опросом.
 
-## Куда это растёт
+## Куда растёт
 
-1. **REPL по serial** — читатель уже есть; интерфейс ядра становится интерактивным.
-2. **Компилятор в байткод** — интерфейс остаётся, скорость растёт; базовая линия для сравнения уже
-   измерена (2,74M форм/с, 465k вызовов/с в QEMU TCG).
-3. **Диск и персистентность** — поколения переживают перезагрузку, и тогда это документное ядро из
-   `kernel-spikes/0003` целиком.
-4. **Контракты и две задачи с дедлайнами** — планировщик, который исполняет обязательства, а не
-   приоритеты.
+1. **Прерывания и вытеснение** — таймер (sstc), trap-хендлер, сохранение контекста; тогда контракт
+   станет ограничением, а не замером.
+2. **Пользовательский режим** — U-mode + capability вместо проверки uid.
+3. **Сеть** — virtio-net тем же способом, что диск.
+4. **Поколенческие арены** — освобождать арену целиком при коммите.
 
 Лицензия MIT.
