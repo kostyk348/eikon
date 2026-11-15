@@ -416,26 +416,38 @@ fn checks(k: &Kernel) -> u32 {
         }
     }
 
-    serial::write_str("\n[8] preemption: the timer takes the CPU away\n");
+    serial::write_str("\n[8] deadlines: the scheduler picks by promise, not by turn\n");
     let spawned = eval_str(
         k,
-        r#"(spawn "long" 5 (lambda () (fib 17)))
-(spawn "short" 1000 (lambda () (fib 8)))"#,
+        r#"(spawn "edge" 4 (lambda () (fib 9)))
+(spawn "tight" 12 (lambda () (fib 17)))
+(spawn "loose" 300 (lambda () (fib 14)))"#,
     );
-    c.check("two tasks spawned, each with its own stack", spawned.is_ok() && sched::sched().n == 2);
+    c.check("three tasks spawned, each with its own stack", spawned.is_ok() && sched::sched().n == 3);
     let ran = eval_str(k, "(sched-run)");
     c.check("the preemptive run finished without error", ran.is_ok() && !sched::sched().failed);
     c.check("no task stack ran into the scheduler (.bss canary intact)", sched::stacks_intact());
     let s = sched::sched();
     c.check("the timer fired and the tasks were interrupted", s.ticks > 0);
-    c.check("both tasks ran to completion", s.tasks[0].finished && s.tasks[1].finished);
     c.check(
-        "the long task was preempted more than once",
-        s.tasks[0].slices > 1 && s.preemptions > 1,
+        "all three ran to completion",
+        s.tasks[0].finished && s.tasks[1].finished && s.tasks[2].finished,
     );
     c.check(
-        "a broken promise is counted: both kept and missed appear",
-        s.tasks[0].missed && !s.tasks[1].missed && s.misses == 1,
+        "the earliest deadline ran first, then the next, then the furthest",
+        s.n_started == 3 && s.start_order[0] == 0 && s.start_order[1] == 1 && s.start_order[2] == 2,
+    );
+    c.check(
+        "the tight task was preempted more than once",
+        s.tasks[1].slices > 1 && s.preemptions > 1,
+    );
+    c.check(
+        "a task that can no longer make its deadline yields to one that can",
+        s.n_finished == 3 && s.finish_order[2] == 1 && s.finish_order[1] == 2,
+    );
+    c.check(
+        "one broken promise, counted and named",
+        s.misses == 1 && s.tasks[1].missed && !s.tasks[0].missed && !s.tasks[2].missed,
     );
     let mut i = 0;
     while i < s.n {
@@ -453,10 +465,30 @@ fn checks(k: &Kernel) -> u32 {
         serial::write_str("\n");
         i += 1;
     }
-    serial::write_str("  timer ticks: ");
+    serial::write_str("  order started: ");
+    let mut j = 0;
+    while j < s.n_started {
+        serial::write_str(s.tasks[s.start_order[j] as usize].name());
+        if j + 1 < s.n_started {
+            serial::write_str(" -> ");
+        }
+        j += 1;
+    }
+    serial::write_str("\n  order finished: ");
+    j = 0;
+    while j < s.n_finished {
+        serial::write_str(s.tasks[s.finish_order[j] as usize].name());
+        if j + 1 < s.n_finished {
+            serial::write_str(" -> ");
+        }
+        j += 1;
+    }
+    serial::write_str("\n  timer ticks: ");
     serial::write_num(s.ticks as i64);
     serial::write_str(", context switches: ");
     serial::write_num(s.preemptions as i64);
+    serial::write_str(", decisions by deadline: ");
+    serial::write_num(s.by_deadline as i64);
     serial::write_str("\n");
 
     serial::write_str("\n[9] what the machine is made of\n");

@@ -14,7 +14,7 @@ use crate::val::Val;
 
 /// One millisecond at the 10 MHz timebase: preempt often enough to see it.
 pub const TICK: u64 = 10_000;
-pub const MAX_TASKS: usize = 2;
+pub const MAX_TASKS: usize = 4;
 /// Deep enough for `fib 17` through the interpreter: each recursive apply()
 /// frame carries its argument array on the stack, so 32 KiB overflowed quietly
 /// into the scheduler that lives next to the stacks in .bss. The canary below
@@ -34,6 +34,9 @@ pub struct Task {
     pub deadline_ms: u64,
     pub func: Val,
     pub sp: u64,
+    /// Tick when the task was created: its deadline counts from here until it
+    /// first runs, and from the first run after that.
+    pub spawn_tick: u64,
     pub started: u64,
     pub slices: u64,
     pub finished: bool,
@@ -49,6 +52,7 @@ impl Task {
             deadline_ms: 0,
             func: Val::Nil,
             sp: 0,
+            spawn_tick: 0,
             started: 0,
             slices: 0,
             finished: false,
@@ -67,6 +71,15 @@ pub struct Sched {
     pub preemptions: u64,
     pub misses: u64,
     pub failed: bool,
+    /// Who ran first, and who finished first: EDF is a claim about order, so
+    /// the order has to be observable.
+    pub start_order: [i8; MAX_TASKS],
+    pub n_started: usize,
+    pub finish_order: [i8; MAX_TASKS],
+    pub n_finished: usize,
+    /// Times a task that could still make its deadline was running and the
+    /// scheduler handed the CPU to an even tighter one.
+    pub by_deadline: u64,
 }
 
 impl Task {
@@ -86,6 +99,11 @@ impl Sched {
             preemptions: 0,
             misses: 0,
             failed: false,
+            start_order: [-1; MAX_TASKS],
+            n_started: 0,
+            finish_order: [-1; MAX_TASKS],
+            n_finished: 0,
+            by_deadline: 0,
         }
     }
 
@@ -100,7 +118,7 @@ impl Sched {
         let i = self.n;
         unsafe {
             let base = &mut *core::ptr::addr_of_mut!(STACKS);
-            core::ptr::write_volatile(base[i].as_mut_ptr() as *mut u64, CANARY);
+            core::ptr::write_volatile(base[i].0.as_mut_ptr() as *mut u64, CANARY);
         }
         // a function address is an integer here: this is a kernel
         #[allow(function_casts_as_integer)]
@@ -114,26 +132,55 @@ impl Sched {
             deadline_ms,
             func,
             sp: sp as u64,
+            spawn_tick: crate::trap::now(),
             ..Task::empty()
         };
         self.n += 1;
         Ok((i + 1) as u64)
     }
 
-    /// Round-robin over unfinished tasks, starting after `from`.
-    fn next_task(&self, from: i32) -> i32 {
+    /// When this task must be done, in ticks since boot. A task that has not
+    /// run yet is judged from the moment it was created; one that has run, from
+    /// the moment it was given the CPU.
+    fn abs_deadline(&self, i: usize) -> u64 {
+        let t = &self.tasks[i];
+        let base = if t.started != 0 { t.started } else { t.spawn_tick };
+        base.saturating_add(t.deadline_ms.saturating_mul(10_000))
+    }
+
+    /// Earliest deadline first - with the part that makes it a *policy* and not
+    /// a sort: a task whose deadline has already passed no longer competes with
+    /// tasks that can still make theirs. The late one still runs (nothing is
+    /// thrown away), but only when nothing feasible is left.
+    fn pick(&self, now: u64) -> i32 {
         if self.n == 0 || self.n > MAX_TASKS {
             return -1;
         }
-        let mut k = 0;
-        while k < self.n {
-            let cand = ((from + 1 + k as i32).rem_euclid(self.n as i32)) as usize;
-            if !self.tasks[cand].finished {
-                return cand as i32;
+        let mut live: i32 = -1;
+        let mut live_dl = u64::MAX;
+        let mut late: i32 = -1;
+        let mut late_dl = u64::MAX;
+        let mut i = 0;
+        while i < self.n {
+            if !self.tasks[i].finished {
+                let dl = self.abs_deadline(i);
+                if now <= dl {
+                    if dl < live_dl {
+                        live_dl = dl;
+                        live = i as i32;
+                    }
+                } else if dl < late_dl {
+                    late_dl = dl;
+                    late = i as i32;
+                }
             }
-            k += 1;
+            i += 1;
         }
-        -1
+        if live >= 0 {
+            live
+        } else {
+            late
+        }
     }
 
     /// Take the interrupted frame, return the frame to resume with.
@@ -180,21 +227,35 @@ impl Sched {
             self.idle_sp = sp;
         }
 
-        let next = self.next_task(self.cur);
+        let now = crate::trap::now();
+        let next = self.pick(now);
         if next < 0 {
             self.cur = -1;
             return self.idle_sp;
         }
-        self.cur = next;
-        if self.tasks[next as usize].started == 0 {
-            self.tasks[next as usize].started = crate::trap::now();
+        if self.cur >= 0 && self.cur != next {
+            self.by_deadline += 1;
         }
-        self.tasks[next as usize].sp
+        self.cur = next;
+        let ni = next as usize;
+        if self.tasks[ni].started == 0 {
+            self.tasks[ni].started = now;
+            if self.n_started < MAX_TASKS {
+                self.start_order[self.n_started] = next as i8;
+                self.n_started += 1;
+            }
+        }
+        self.tasks[ni].sp
     }
 }
 
 static mut SCHED: Sched = Sched::new();
-static mut STACKS: [[u8; STACK]; MAX_TASKS] = [[0; STACK]; MAX_TASKS];
+/// 16-byte aligned: the trap frame offset and Rust's own aligned locals both
+/// assume it, and a u8 array only guarantees one byte.
+#[repr(align(16))]
+struct Stack([u8; STACK]);
+
+static mut STACKS: [Stack; MAX_TASKS] = [const { Stack([0; STACK]) }; MAX_TASKS];
 
 /// Did any task's stack overflow? Checked after the run, so an overflow is a
 /// named failure and not a mystery panic somewhere else in .bss.
@@ -203,7 +264,7 @@ pub fn stacks_intact() -> bool {
     let base = unsafe { &mut *core::ptr::addr_of_mut!(STACKS) };
     let n = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*sched_ptr()).n)) };
     while i < n {
-        let magic = unsafe { core::ptr::read_volatile(base[i].as_mut_ptr() as *const u64) };
+        let magic = unsafe { core::ptr::read_volatile(base[i].0.as_mut_ptr() as *const u64) };
         if magic != CANARY {
             return false;
         }
@@ -221,14 +282,14 @@ pub fn sched() -> &'static mut Sched {
 }
 
 fn stack_bounds(i: usize) -> (usize, usize) {
-    let s: &'static mut [[u8; STACK]; MAX_TASKS] = unsafe { &mut *core::ptr::addr_of_mut!(STACKS) };
-    let base = s[i].as_mut_ptr() as usize;
+    let s: &'static mut [Stack; MAX_TASKS] = unsafe { &mut *core::ptr::addr_of_mut!(STACKS) };
+    let base = s[i].0.as_mut_ptr() as usize;
     (base, base + STACK)
 }
 
 fn stack_top(i: usize) -> usize {
-    let s: &'static mut [[u8; STACK]; MAX_TASKS] = unsafe { &mut *core::ptr::addr_of_mut!(STACKS) };
-    s[i].as_mut_ptr() as usize + STACK - 16
+    let s: &'static mut [Stack; MAX_TASKS] = unsafe { &mut *core::ptr::addr_of_mut!(STACKS) };
+    s[i].0.as_mut_ptr() as usize + STACK - 16
 }
 
 /// One task's whole life: run the closure, account the promise, yield forever.
@@ -249,7 +310,9 @@ pub extern "C" fn task_entry() -> ! {
         let res = crate::eval::apply(k, func, &[]);
         let ok = res.is_ok();
         if let Err(e) = res {
-            crate::serial::write_str("\ntask failed: ");
+            crate::serial::write_str("\ntask ");
+            crate::serial::write_num(i as i64);
+            crate::serial::write_str(" failed: ");
             crate::serial::write_str(e);
             crate::serial::write_str("\n");
         }
@@ -269,6 +332,11 @@ pub extern "C" fn task_entry() -> ! {
                 core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).failed), true);
             }
             core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).tasks[i].finished), true);
+            let nf = core::ptr::read_volatile(core::ptr::addr_of!((*p).n_finished));
+            if nf < MAX_TASKS {
+                core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).finish_order[nf]), i as i8);
+                core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).n_finished), nf + 1);
+            }
         }
     }
     loop {

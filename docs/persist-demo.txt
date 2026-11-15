@@ -4,7 +4,7 @@ eikon repl. type forms; (quit) leaves.
 => 6
 > (save)
 => 12
-> qemu-system-riscv64: terminating on signal 15 from pid 31825 (timeout)
+> qemu-system-riscv64: terminating on signal 15 from pid 30719 (timeout)
 === boot 2: the same disk, nothing typed ===
 virtio-blk: 8192 sectors
 image restored from disk: generation 1

@@ -41,19 +41,30 @@ image restored from disk: generation 1
     bytecode  : 58 ms, 395632 calls/s
 [7] the image on disk: generations survive a reboot
   PASS what came back is what was saved
-[8] preemption: the timer takes the CPU away
+[8] deadlines: the scheduler picks by promise, not by turn
+  PASS three tasks spawned, each with its own stack
+  PASS the preemptive run finished without error
+  PASS no task stack ran into the scheduler (.bss canary intact)
   PASS the timer fired and the tasks were interrupted
-  PASS both tasks ran to completion
-  PASS the long task was preempted more than once
-  PASS a broken promise is counted: both kept and missed appear
-  long: promised 5 ms, took 16 ms in 14 slices -> MISSED
-  short: promised 1000 ms, took 0 ms -> kept
-  timer ticks: 17, context switches: 14
+  PASS all three ran to completion
+  PASS the earliest deadline ran first, then the next, then the furthest
+  PASS the tight task was preempted more than once
+  PASS a task that can no longer make its deadline yields to one that can
+  PASS one broken promise, counted and named
+  edge: promised 4 ms, took 2 ms in 2 slices -> kept
+  tight: promised 12 ms, took 37 ms in 27 slices -> MISSED
+  loose: promised 300 ms, took 6 ms in 6 slices -> kept
+  order started: edge -> tight -> loose
+  order finished: edge -> loose -> tight
+  timer ticks: 39, context switches: 35, decisions by deadline: 3
+[9] what the machine is made of
+  generations 5 (root 6, parent index 3), capabilities 1
+  cons cells 29211, symbols 23, closures 9, code blocks 16, constants 53
 
 === PASS (failures: 0) ===
 ```
 
-32 проверки, все зелёные: [`docs/boot-log.txt`](docs/boot-log.txt). Гейт одной командой: `tools/check.sh`
+34 проверки, все зелёные: [`docs/boot-log.txt`](docs/boot-log.txt). Гейт одной командой: `tools/check.sh`
 (собирает, загружает, падает, если самопроверка не прошла).
 
 ## Что уже работает
@@ -67,7 +78,8 @@ image restored from disk: generation 1
 | **Диск** | virtio-blk (legacy и modern): `(save)` пишет образ, следующая загрузка печатает `image restored from disk: generation N` |
 | **Власть** | capability handle, выкованный секретом ядра; подделка отвергается |
 | **Прерывание** | `stvec` + ассемблерный трамплин на 256 байт: 30 регистров, `sepc`, `sstatus`; таймер — Sstc/`stimecmp` или SBI |
-| **Вытеснение** | у каждой задачи свой стек (1 МиБ), переключение контекста — это просто другой указатель стека; `(fib 17)` рвётся на 14 срезов по 1 мс |
+| **Вытеснение** | у каждой задачи свой стек (1 МиБ), переключение контекста — это просто другой указатель стека; тик забирает процессор каждую миллисекунду |
+| **EDF** | выбор по ближайшему дедлайну, а не по очереди; задача, которая уже не успевает, уступает той, что ещё может успеть — и всё равно доигрывается |
 | **Контракты** | `(spawn "имя" deadline-ms fn)` + `(sched-run)`: обещанное против фактического, нарушение считается и называется |
 
 Диск пережил перезагрузку — `tools/persist.sh`, лог в [`docs/persist-demo.txt`](docs/persist-demo.txt):
@@ -133,8 +145,8 @@ src/main.rs      загрузка, самопроверка, REPL
 ## Чего здесь нет (честно)
 
 - **MMU и адресных пространств**: адреса физические, изоляции процессов нет.
-- **Приоритетов и справедливости**: планировщик — round-robin между невыполненными задачами, а не EDF;
-  контракт по-прежнему *измеряется*, а не ограничивает исполнение (вытеснение есть, наказания за срыв нет).
+- **Наказания за срыв**: опоздавшая задача теряет приоритет, но не получает штрафа и не снимается — она
+  просто доигрывает последней. Отмены, повторов и учёта срыва в истории поколений пока нет.
 - **Блокировок между задачами**: общее состояние (куча, образ) защищено только выключением прерываний на
   время записи, а не спинлоками; гонок нет потому, что hart один.
 - Пользовательского режима, сети, чисел с плавающей точкой, строк переменной длины.
@@ -143,8 +155,8 @@ src/main.rs      загрузка, самопроверка, REPL
 
 ## Куда растёт
 
-1. **Планировщик по дедлайнам** — заменить round-robin на EDF с пересчётом при каждом тике, чтобы
-   контракт стал ограничением: опаздывающую задачу вытесняют, а не только считают.
+1. **Отмена и повтор** — сорванный контракт должен что-то значить: отменить задачу, повторить с новым
+   бюджетом или записать срыв в поколение состояния, чтобы он был виден снаружи.
 2. **Пользовательский режим** — U-mode + capability вместо проверки uid.
 3. **Сеть** — virtio-net тем же способом, что диск.
 4. **Поколенческие арены** — освобождать арену целиком при коммите.

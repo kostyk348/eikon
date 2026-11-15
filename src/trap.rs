@@ -104,19 +104,23 @@ trap_entry:
     ld s9, 184(sp)
     ld s10, 192(sp)
     ld s11, 200(sp)
-    ld t3, 208(sp)
     ld t4, 216(sp)
     ld t5, 224(sp)
     ld t6, 232(sp)
 
+    // t3 is the scratch for the SIE mask, so t3 is restored at the very end
+    // together with t0/t1: using a context register as scratch after restoring
+    // it silently destroys that register on every return from a trap, and the
+    // interpreter keeps live values in t2/t3 all the time.
     ld t1, 248(sp)          // saved sstatus
-    li t2, -3
-    and t1, t1, t2          // clear SIE: interrupts come back with sret
+    li t3, -3
+    and t1, t1, t3          // clear SIE: interrupts come back with sret
     csrw sstatus, t1
     ld t1, 240(sp)          // saved sepc
     csrw sepc, t1
-    ld t0,  24(sp)          // t0/t1 restored last, with interrupts still off
+    ld t0,  24(sp)          // t0/t1/t3 restored last, interrupts still off
     ld t1,  32(sp)
+    ld t3, 208(sp)
     addi sp, sp, 256
     sret
 "#
@@ -172,17 +176,24 @@ fn clear_sstatus(bits: u64) {
 pub fn irq_save() -> u64 {
     let prev: u64;
     unsafe {
+        // No `nomem` here, on purpose. Without it the compiler is free to move
+        // a store across the boundary - allocate the cell *before* interrupts
+        // are off, update the bump pointer *after* they are back on - and two
+        // tasks then take the same cell. Rare, timing-shaped, and invisible
+        // until it isn't. The asm may touch memory, so it fences the lot.
         core::arch::asm!(
             "csrr {}, sstatus",
             "csrci sstatus, 2", // clear SIE
             out(reg) prev,
-            options(nomem, nostack)
+            options(nostack)
         )
     };
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     prev & SSTATUS_SIE
 }
 
 pub fn irq_restore(prev: u64) {
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     if prev != 0 {
         set_sstatus(SSTATUS_SIE);
     }
