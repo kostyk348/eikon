@@ -120,10 +120,22 @@ pub fn mix(secret: u64, a: u64, b: u64) -> u64 {
 pub struct Kernel {
     pub heap: Heap,
     pub img: Image,
+    // the compiled image: code blocks and their constant pool
+    pub codes: [crate::bytecode::Code; crate::bytecode::MAX_CODES],
+    pub ncodes: usize,
+    pub consts: [Val; crate::bytecode::MAX_CONSTS],
+    pub nconsts: usize,
 }
 
 impl Kernel {
     pub const fn new() -> Self {
-        Kernel { heap: Heap::new(), img: Image::new() }
+        Kernel {
+            heap: Heap::new(),
+            img: Image::new(),
+            codes: [crate::bytecode::Code::new(); crate::bytecode::MAX_CODES],
+            ncodes: 0,
+            consts: [Val::Nil; crate::bytecode::MAX_CONSTS],
+            nconsts: 0,
+        }
     }
 }

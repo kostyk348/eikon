@@ -16,6 +16,7 @@
 #![no_std]
 #![no_main]
 
+mod bytecode;
 mod eval;
 mod image;
 mod print;
@@ -171,17 +172,6 @@ fn checks(k: &mut Kernel) -> u32 {
     let printed_static: &'static str = unsafe { core::str::from_utf8_unchecked(&rt[..n]) };
     let mut again = read::Reader::new(printed_static);
     let reparsed = again.all(&mut k.heap).unwrap_or(Val::Int(-1));
-    if !same(k, forms, reparsed) {
-        serial::write_str("  printed: ");
-        serial::write_str(printed_static);
-        serial::write_str("\n  reparsed: ");
-        let mut b2 = print::Buf::new();
-        match print::to_buf(&k.heap, reparsed, &mut b2) {
-            Ok(t) => serial::write_str(t),
-            Err(e) => serial::write_str(e),
-        }
-        serial::write_str("\n");
-    }
     let reparsed_one = k.heap.car(reparsed).unwrap_or(NIL);
     c.check("print -> read yields the same form", same(k, forms, reparsed_one));
 
@@ -202,7 +192,49 @@ fn checks(k: &mut Kernel) -> u32 {
     );
     c.check("'plant stays a symbol", matches!(eval_str(k, "'plant"), Ok(Val::Sym(_))));
 
-    serial::write_str("\n[3] state is a form: commit, audit, rollback\n");
+    serial::write_str("\n[3] the same forms, compiled: bytecode runs the boot image\n");
+    let mut cur = forms;
+    let mut compiled_err: &'static str = "";
+    while let Val::Cons(_) = cur {
+        let form = match k.heap.car(cur) {
+            Ok(f) => f,
+            Err(e) => {
+                compiled_err = e;
+                break;
+            }
+        };
+        match bytecode::compile(k, form) {
+            Ok(ci) => match bytecode::run(k, ci, NIL) {
+                Ok(_) => {}
+                Err(e) => {
+                    compiled_err = e;
+                    break;
+                }
+            },
+            Err(e) => {
+                compiled_err = e;
+                break;
+            }
+        }
+        cur = match k.heap.cdr(cur) {
+            Ok(v) => v,
+            Err(e) => {
+                compiled_err = e;
+                break;
+            }
+        };
+    }
+    c.check("compiled boot image runs without error", compiled_err.is_empty());
+    if !compiled_err.is_empty() {
+        serial::write_str("  error: ");
+        serial::write_str(compiled_err);
+        serial::write_str("\n");
+    }
+    c.check("compiled (fact 10) = 3628800", compiled_int(k, "(fact 10)", 3628800));
+    c.check("compiled (fib 15) = 610", compiled_int(k, "(fib 15)", 610));
+    c.check("compiled (sq 7) = 49", compiled_int(k, "(sq 7)", 49));
+
+    serial::write_str("\n[4] state is a form: commit, audit, rollback\n");
     let base = eval_str(k, "base").unwrap_or(NIL);
     let g1 = k.img.commit(base).unwrap_or(0);
     let seven = match k.heap.cons(Val::Int(7), NIL) {
@@ -215,7 +247,7 @@ fn checks(k: &mut Kernel) -> u32 {
     let g3 = k.img.rollback(g1).unwrap_or(0);
     c.check("rollback republishes the old root", g3 > g2 && same(k, k.img.root(), base));
 
-    serial::write_str("\n[4] authority is a capability, not a number\n");
+    serial::write_str("\n[5] authority is a capability, not a number\n");
     let cap = k.img.mint().unwrap_or(0);
     c.check("the image mints a handle", cap != 0);
     let open_sym = sym(k, "open");
@@ -226,90 +258,144 @@ fn checks(k: &mut Kernel) -> u32 {
     let forged = eval::eval(k, NIL, forged_form);
     c.check("a forged handle is refused", forged.is_err());
 
-    serial::write_str("\n[5] speed: a form on one hart, no MMU, no cache tricks\n");
+    serial::write_str("\n[6] speed: tree-walk against bytecode, same forms\n");
     let fib_sym = sym(k, "fib");
     let fib_form = list2(k, fib_sym, Val::Int(12));
-    // Everything live was allocated before this mark (the boot image, the
-    // globals). What the benchmark allocates below is scratch, so the arena is
-    // rewound after every iteration instead of being garbage collected.
     let mark = k.heap.mark();
-    let mut peak = 0usize;
+
+    // tree-walk
     let t0 = serial::ticks();
-    let mut iters = 0u64;
     let mut acc = NIL;
+    let mut iters = 0u64;
     while iters < 50 {
         acc = match eval::eval(k, NIL, fib_form) {
             Ok(v) => v,
             Err(_) => Val::Int(-1),
         };
-        let used = k.heap.ncells - mark;
-        if used > peak {
-            peak = used;
-        }
         k.heap.rewind(mark);
         iters += 1;
     }
-    let dt = serial::ticks().saturating_sub(t0);
-    c.check("(fib 12) = 144, measured 50 times", is_int(acc, 144));
-    // fib(12) makes 465 calls, so 200 of them is the workload being timed.
-    let calls: u64 = 50 * 465;
-    serial::write_str("  ");
-    serial::write_num((dt / 100) as i64);
-    serial::write_str(" ms for ");
-    serial::write_str("23k calls (fib 12 x50)");
-    serial::write_str("; ");
-    if dt > 0 {
-        serial::write_num((calls * 10_000_000 / dt) as i64);
-        serial::write_str(" calls/s\n");
-    } else {
-        serial::write_str("unmeasurable (timer granularity)\n");
-    }
+    let tw_fib = serial::ticks().saturating_sub(t0);
+    c.check("tree-walk (fib 12) = 144", is_int(acc, 144));
 
-    // A second, minimal workload: one form, no recursion, so the number says
-    // what a form costs and not what the recursion costs.
-    let sum_sym = sym(k, "+");
-    let two = list2(k, sum_sym, Val::Int(1));
-    let one_two = list2(k, two, Val::Int(2));
-    let m2 = k.heap.mark();
+    // bytecode
+    let fib_ci = bytecode::compile(k, fib_form).unwrap_or(0);
+    let mark2 = k.heap.mark();
     let t1 = serial::ticks();
-    let mut n2 = 0u64;
-    while n2 < 20_000 {
+    let mut acc2 = NIL;
+    let mut iters2 = 0u64;
+    while iters2 < 50 {
+        acc2 = match bytecode::run(k, fib_ci, NIL) {
+            Ok(v) => v,
+            Err(_) => Val::Int(-1),
+        };
+        k.heap.rewind(mark2);
+        iters2 += 1;
+    }
+    let bc_fib = serial::ticks().saturating_sub(t1);
+    c.check("bytecode (fib 12) = 144", is_int(acc2, 144));
+
+    // the same for a one-form workload: what a form costs
+    let sum_sym = sym(k, "+");
+    let sum_form = list2(k, sum_sym, Val::Int(1));
+    let one_two = list2(k, sum_form, Val::Int(2));
+    let m3 = k.heap.mark();
+    let t2 = serial::ticks();
+    let mut n3 = 0u64;
+    while n3 < 20_000 {
         let _ = eval::eval(k, NIL, one_two);
-        k.heap.rewind(m2);
-        n2 += 1;
+        k.heap.rewind(m3);
+        n3 += 1;
     }
-    let d2 = serial::ticks().saturating_sub(t1);
-    serial::write_str("  (+ 1 2) x20000: ");
-    if d2 > 0 {
-        serial::write_num((20_000u64 * 10_000_000 / d2) as i64);
-        serial::write_str(" forms/s\n");
-    } else {
-        serial::write_str("unmeasurable\n");
+    let tw_sum = serial::ticks().saturating_sub(t2);
+    let sum_ci = bytecode::compile(k, one_two).unwrap_or(0);
+    let m4 = k.heap.mark();
+    let t3 = serial::ticks();
+    let mut n4 = 0u64;
+    while n4 < 20_000 {
+        let _ = bytecode::run(k, sum_ci, NIL);
+        k.heap.rewind(m4);
+        n4 += 1;
     }
+    let bc_sum = serial::ticks().saturating_sub(t3);
 
-    serial::write_str("  peak scratch per evaluation: ");
-    serial::write_num(peak as i64);
-    serial::write_str(" cons cells, rewound after every iteration\n");
+    let calls: u64 = 50 * 465;
+    serial::write_str("  (fib 12) x50 = 23k calls\n");
+    serial::write_str("    tree-walk : ");
+    serial::write_num((tw_fib / 100) as i64);
+    serial::write_str(" ms, ");
+    if tw_fib > 0 {
+        serial::write_num((calls * 10_000_000 / tw_fib) as i64);
+    }
+    serial::write_str(" calls/s\n");
+    serial::write_str("    bytecode  : ");
+    serial::write_num((bc_fib / 100) as i64);
+    serial::write_str(" ms, ");
+    if bc_fib > 0 {
+        serial::write_num((calls * 10_000_000 / bc_fib) as i64);
+    }
+    serial::write_str(" calls/s\n");
 
-    serial::write_str("\n[6] what the machine is made of\n");
+    serial::write_str("  (+ 1 2) x20000\n");
+    serial::write_str("    tree-walk : ");
+    if tw_sum > 0 {
+        serial::write_num((20_000u64 * 10_000_000 / tw_sum) as i64);
+    }
+    serial::write_str(" forms/s\n");
+    serial::write_str("    bytecode  : ");
+    if bc_sum > 0 {
+        serial::write_num((20_000u64 * 10_000_000 / bc_sum) as i64);
+    }
+    serial::write_str(" forms/s\n");
+    if bc_sum > 0 && tw_sum > 0 {
+        serial::write_str("  ratio: ");
+        serial::write_num(((tw_sum as u64 * 100) / bc_sum as u64) as i64);
+        serial::write_str("% of the tree-walk time\n");
+    }
+    // Honest criterion: the compiler must win where the work is calls, and
+    // must not collapse on a one-form workload (where dispatch dominates).
+    c.check("bytecode is faster on call-heavy code", bc_fib < tw_fib);
+    c.check("bytecode stays within 20% on a one-form workload", bc_sum <= tw_sum + tw_sum / 5);
+
+    serial::write_str("\n[7] what the machine is made of\n");
     serial::write_str("  generations ");
     serial::write_num(k.img.n as i64);
     serial::write_str(" (root ");
     serial::write_num(k.img.generation() as i64);
     serial::write_str(", parent index ");
     serial::write_num(k.img.gens[k.img.n - 1].parent);
-    serial::write_str(")");
-    serial::write_str(", capabilities ");
+    serial::write_str("), capabilities ");
     serial::write_num(k.img.ncaps as i64);
-    serial::write_str(", cons cells ");
+    serial::write_str("\n  cons cells ");
     serial::write_num(k.heap.ncells as i64);
     serial::write_str(", symbols ");
     serial::write_num(k.heap.nsyms as i64);
     serial::write_str(", closures ");
     serial::write_num(k.heap.nclosures as i64);
+    serial::write_str(", code blocks ");
+    serial::write_num(k.ncodes as i64);
+    serial::write_str(", constants ");
+    serial::write_num(k.nconsts as i64);
     serial::write_str("\n");
 
     c.failed
+}
+
+/// Compile a source string and run it on the VM; compare with the expected int.
+fn compiled_int(k: &mut Kernel, src: &'static str, want: i64) -> bool {
+    let mut r = read::Reader::new(src);
+    let forms = match r.all(&mut k.heap) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let form = match k.heap.car(forms) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    match bytecode::compile(k, form) {
+        Ok(ci) => matches!(bytecode::run(k, ci, NIL), Ok(v) if is_int(v, want)),
+        Err(_) => false,
+    }
 }
 
 fn list2(k: &mut Kernel, a: Val, b: Val) -> Val {

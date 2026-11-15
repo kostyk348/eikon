@@ -50,7 +50,7 @@ pub fn eval(k: &mut Kernel, env: Val, form: Val) -> Result<Val, &'static str> {
                     "lambda" => {
                         let params = k.heap.car(rest)?;
                         let body = k.heap.cdr(rest)?;
-                        return k.heap.mk_closure(params, body, env);
+                        return k.heap.mk_closure(params, body, env, -1);
                     }
                     "def" => {
                         let target = k.heap.car(rest)?;
@@ -61,7 +61,7 @@ pub fn eval(k: &mut Kernel, env: Val, form: Val) -> Result<Val, &'static str> {
                             Val::Cons(_) => {
                                 let fname = k.heap.car(target)?;
                                 let params = k.heap.cdr(target)?;
-                                let clo = k.heap.mk_closure(params, body, env)?;
+                                let clo = k.heap.mk_closure(params, body, env, -1)?;
                                 let sym = match fname {
                                     Val::Sym(s) => s,
                                     _ => return Err("EINVAL: function name must be a symbol"),
@@ -205,7 +205,7 @@ pub fn lookup(k: &Kernel, mut env: Val, sym: Val) -> Result<Val, &'static str> {
 pub fn apply(k: &mut Kernel, f: Val, args: &[Val]) -> Result<Val, &'static str> {
     match f {
         Val::Clos(c) => {
-            let (params, body, closure_env) = k.heap.closure(c);
+            let (params, body, closure_env, _code) = k.heap.closure(c);
             if k.heap.list_len(params) != args.len() {
                 return Err("EINVAL: wrong number of arguments");
             }
@@ -228,6 +228,38 @@ pub fn apply(k: &mut Kernel, f: Val, args: &[Val]) -> Result<Val, &'static str> 
 
 fn prim(k: &mut Kernel, name: &'static str, args: &[Val]) -> Result<Val, &'static str> {
     match name {
+        // image operations as ordinary primitives, so a compiled program and an
+        // interpreted program see exactly the same functions
+        "commit" => Ok(Val::Int(k.img.commit(args[0])? as i64)),
+        "root" => Ok(k.img.root()),
+        "gen" => Ok(Val::Int(k.img.generation() as i64)),
+        "rollback" => match args[0] {
+            Val::Int(n) => k.img.rollback(n as u64).map(|g| Val::Int(g as i64)),
+            _ => Err("EINVAL: rollback needs a generation number"),
+        },
+        "cap" => Ok(Val::Cap(k.img.mint()?)),
+        "open" => match args[0] {
+            Val::Cap(id) if k.img.holds(id) => Ok(k.img.root()),
+            Val::Cap(_) => Err("EPERM: no such capability"),
+            _ => Err("EINVAL: open needs a capability"),
+        },
+        "print" => {
+            let mut buf = Buf::new();
+            let text = crate::print::to_buf(&k.heap, args[0], &mut buf)?;
+            crate::serial::write_str(text);
+            crate::serial::write_str("\n");
+            Ok(args[0])
+        }
+        "audit" => {
+            let mut out = NIL;
+            let mut i = 0;
+            while i < k.img.n {
+                let id = k.img.gens[i].id as i64;
+                out = k.heap.cons(Val::Int(id), out)?;
+                i += 1;
+            }
+            Ok(out)
+        }
         "+" | "-" | "*" | "<" | "=" => {
             if args.len() != 2 {
                 return Err("EINVAL: binary primitive");

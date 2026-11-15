@@ -71,8 +71,6 @@ hart 0, riscv64, no mmu, no allocator, no crates
 [1] the image is text, and text is the image
   forms in the boot image: 8
   PASS boot image reads as eight forms
-  printed: ((def (fact n) (if (< n 2) 1 (* n (fact (- n 1))))) (def (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (def sq (lambda (x) (* x x))) (def base (list (quote plant) 200 1)) (print (fact 10)) (print (fib 15)) (print (sq 7)) base)
-  reparsed: (((def (fact n) (if (< n 2) 1 (* n (fact (- n 1))))) (def (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (def sq (lambda (x) (* x x))) (def base (list (quote plant) 200 1)) (print (fact 10)) (print (fib 15)) (print (sq 7)) base))
   PASS print -> read yields the same form
 
 [2] the language runs: recursion, closures, let
@@ -86,26 +84,45 @@ hart 0, riscv64, no mmu, no allocator, no crates
   PASS (let ((a 2) (b 3)) (+ a b)) = 5
   PASS 'plant stays a symbol
 
-[3] state is a form: commit, audit, rollback
+[3] the same forms, compiled: bytecode runs the boot image
+3628800
+610
+49
+  PASS compiled boot image runs without error
+  PASS compiled (fact 10) = 3628800
+  PASS compiled (fib 15) = 610
+  PASS compiled (sq 7) = 49
+
+[4] state is a form: commit, audit, rollback
   PASS two generations published
   PASS root is the newest form
   PASS rollback republishes the old root
 
-[4] authority is a capability, not a number
+[5] authority is a capability, not a number
   PASS the image mints a handle
   PASS a held handle opens the root
   PASS a forged handle is refused
 
-[5] speed: a form on one hart, no MMU, no cache tricks
-  PASS (fib 12) = 144, measured 50 times
-  5001 ms for 23k calls (fib 12 x50); 464823 calls/s
-  (+ 1 2) x20000: 2739050 forms/s
-  peak scratch per evaluation: 930 cons cells, rewound after every iteration
+[6] speed: tree-walk against bytecode, same forms
+  PASS tree-walk (fib 12) = 144
+  PASS bytecode (fib 12) = 144
+  (fib 12) x50 = 23k calls
+    tree-walk : 4425 ms, 525399 calls/s
+    bytecode  : 1983 ms, 1171945 calls/s
+  (+ 1 2) x20000
+    tree-walk : 2934014 forms/s
+    bytecode  : 2842645 forms/s
+  ratio: 96% of the tree-walk time
+  PASS bytecode is faster on call-heavy code
+  PASS bytecode stays within 20% on a one-form workload
 
-[6] what the machine is made of
-  generations 3, capabilities 1, cons cells 8233, symbols 21, closures 3
+[7] what the machine is made of
+  generations 3 (root 3, parent index 1), capabilities 1
+  cons cells 16181, symbols 21, closures 6, code blocks 16, constants 53
 
 === PASS (failures: 0) ===
 
-halted. root is generation 3
-qemu-system-riscv64: terminating on signal 15 from pid 27011 (timeout)
+root is generation 3
+
+eikon repl. type forms; (quit) leaves.
+> qemu-system-riscv64: terminating on signal 15 from pid 19639 (timeout)

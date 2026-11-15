@@ -39,7 +39,7 @@ pub struct Heap {
     pub nsyms: usize,
     pub strs: [&'static str; STR_POOL],
     pub nstrs: usize,
-    pub closures: [(Val, Val, Val); CLOS_POOL], // params, body, env
+    pub closures: [(Val, Val, Val, i64); CLOS_POOL], // params, body forms, env, code (-1 = none)
     pub nclosures: usize,
     pub globals: [(&'static str, Val); GLOBAL_POOL],
     pub nglobals: usize,
@@ -54,7 +54,7 @@ impl Heap {
             nsyms: 0,
             strs: [""; STR_POOL],
             nstrs: 0,
-            closures: [(Val::Nil, Val::Nil, Val::Nil); CLOS_POOL],
+            closures: [(Val::Nil, Val::Nil, Val::Nil, -1); CLOS_POOL],
             nclosures: 0,
             globals: [("", Val::Nil); GLOBAL_POOL],
             nglobals: 0,
@@ -122,17 +122,20 @@ impl Heap {
         Ok((self.nstrs - 1) as u32)
     }
 
-    pub fn mk_closure(&mut self, params: Val, body: Val, env: Val) -> Result<Val, &'static str> {
+    /// A closure keeps its source forms *and*, when it came from the compiler,
+    /// the code block that implements them. That is what lets the two engines
+    /// call each other's functions: the forms are the truth, code is a cache.
+    pub fn mk_closure(&mut self, params: Val, body: Val, env: Val, code: i64) -> Result<Val, &'static str> {
         if self.nclosures == CLOS_POOL {
             return Err("ENOMEM: closure pool full");
         }
         let i = self.nclosures;
-        self.closures[i] = (params, body, env);
+        self.closures[i] = (params, body, env, code);
         self.nclosures += 1;
         Ok(Val::Clos(i as u32))
     }
 
-    pub fn closure(&self, i: u32) -> (Val, Val, Val) {
+    pub fn closure(&self, i: u32) -> (Val, Val, Val, i64) {
         self.closures[i as usize]
     }
 
