@@ -1,0 +1,146 @@
+warning: field `floor` is never read
+  --> src/../../src/val.rs:53:5
+   |
+47 | pub struct Heap {
+   |            ---- field in this struct
+...
+53 |     floor: Cell<usize>,
+   |     ^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: multiple methods are never used
+   --> src/../../src/val.rs:253:12
+    |
+ 64 | impl Heap {
+    | --------- methods in this implementation
+...
+253 |     pub fn nsyms(&self) -> usize {
+    |            ^^^^^
+...
+257 |     pub fn nstrs(&self) -> usize {
+    |            ^^^^^
+...
+261 |     pub fn nclosures(&self) -> usize {
+    |            ^^^^^^^^^
+...
+265 |     pub fn nglobals(&self) -> usize {
+    |            ^^^^^^^^
+...
+269 |     pub fn mark(&self) -> usize {
+    |            ^^^^
+...
+273 |     pub fn floor(&self) -> usize {
+    |            ^^^^^
+...
+277 |     pub fn set_floor(&self, v: usize) {
+    |            ^^^^^^^^^
+...
+281 |     pub fn rewind(&self, mark: usize) {
+    |            ^^^^^^
+
+warning: field `parent` is never read
+  --> src/../../src/image.rs:26:9
+   |
+23 | pub struct Gen {
+   |            --- field in this struct
+...
+26 |     pub parent: i64, // index into gens, -1 for the genesis
+   |         ^^^^^^
+   |
+   = note: `Gen` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: methods `set_secret` and `caps_count` are never used
+  --> src/../../src/image.rs:54:12
+   |
+38 | impl Image {
+   | ---------- methods in this implementation
+...
+54 |     pub fn set_secret(&self, s: u64) {
+   |            ^^^^^^^^^^
+...
+66 |     pub fn caps_count(&self) -> usize {
+   |            ^^^^^^^^^^
+
+warning: field `blk` is never read
+   --> src/../../src/image.rs:170:9
+    |
+162 | pub struct Kernel {
+    |            ------ field in this struct
+...
+170 |     pub blk: crate::virtio::Blk,
+    |         ^^^
+
+warning: methods `set_blk` and `nconsts` are never used
+   --> src/../../src/image.rs:186:12
+    |
+173 | impl Kernel {
+    | ----------- methods in this implementation
+...
+186 |     pub fn set_blk(&self, b: crate::virtio::Blk) {
+    |            ^^^^^^^
+...
+194 |     pub fn nconsts(&self) -> usize {
+    |            ^^^^^^^
+
+warning: fields `missed` and `took_ms` are never read
+  --> src/sched.rs:11:9
+   |
+10 | pub struct Task {
+   |            ---- fields in this struct
+11 |     pub missed: bool,
+   |         ^^^^^^
+12 |     pub took_ms: u64,
+   |         ^^^^^^^
+   |
+   = note: `Task` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: fields `tasks` and `n` are never read
+  --> src/sched.rs:16:9
+   |
+15 | pub struct Sched {
+   |            ----- fields in this struct
+16 |     pub tasks: [Task; 4],
+   |         ^^^^^
+17 |     pub n: usize,
+   |         ^
+
+warning: function `write_num` is never used
+  --> src/serial.rs:10:8
+   |
+10 | pub fn write_num(v: i64) {
+   |        ^^^^^^^^^
+
+warning: function `now` is never used
+ --> src/trap.rs:7:8
+  |
+7 | pub fn now() -> u64 {
+  |        ^^^
+
+warning: fields `ok` and `capacity` are never read
+ --> src/virtio.rs:4:9
+  |
+3 | pub struct Blk {
+  |            --- fields in this struct
+4 |     pub ok: bool,
+  |         ^^
+5 |     pub capacity: u64,
+  |         ^^^^^^^^
+
+warning: methods `read_sector` and `write_sector` are never used
+  --> src/virtio.rs:13:12
+   |
+ 8 | impl Blk {
+   | -------- methods in this implementation
+...
+13 |     pub fn read_sector(&self, _sector: u64, _out: &mut [u8; 512]) -> Result<(), &'static str> {
+   |            ^^^^^^^^^^^
+...
+17 |     pub fn write_sector(&self, _sector: u64, _data: &[u8; 512]) -> Result<(), &'static str> {
+   |            ^^^^^^^^^^^^
+
+warning: `eikon-host` (bin "eikon-host") generated 12 warnings
+    Finished `release` profile [optimized] target(s) in 0.01s
+     Running `target/x86_64-unknown-linux-gnu/release/eikon-host fuzz 20000`
+parser fuzz: 20000 inputs, 0 panics
+roundtrip fuzz: 20000 forms, 0 mismatches
