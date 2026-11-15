@@ -23,7 +23,11 @@ jobs:
           qemu-system-riscv64 --version
       - name: Install the bare-metal target
         run: rustup target add riscv64gc-unknown-none-elf
-      - name: Build and boot
+      - name: Build the guest ELF
+        # The kernel embeds assets/hello.elf with include_bytes!, so the guest
+        # is built first: no guest, no kernel.
         run: |
           chmod +x tools/*.sh
-          tools/check.sh
+          tools/build-user.sh
+      - name: Build and boot
+        run: tools/check.sh

@@ -106,16 +106,16 @@ image restored from disk: generation 1
   PASS a forged handle is refused
 
 [6] speed: tree-walk against bytecode, same forms
-  control: one (fib 12) without rewind: 1817 us (correct)
+  control: one (fib 12) without rewind: 1961 us (correct)
   PASS tree-walk (fib 12) = 144
   PASS bytecode (fib 12) = 144
   (fib 12) x50 = 23k calls
-    tree-walk : 90 ms, 257532 calls/s
-    bytecode  : 37 ms, 624534 calls/s
+    tree-walk : 94 ms, 246420 calls/s
+    bytecode  : 37 ms, 616620 calls/s
   (+ 1 2) x20000
-    tree-walk : 1676193 forms/s
-    bytecode  : 2097755 forms/s
-  ratio: 125% of the tree-walk time
+    tree-walk : 1542353 forms/s
+    bytecode  : 1991397 forms/s
+  ratio: 129% of the tree-walk time
   PASS bytecode is faster on call-heavy code
   PASS bytecode stays within 20% on a one-form workload
 
@@ -136,11 +136,11 @@ image restored from disk: generation 1
   PASS a task that can no longer make its deadline yields to one that can
   PASS one broken promise, counted and named
   edge: promised 4 ms, took 2 ms in 2 slices -> kept
-  tight: promised 12 ms, took 26 ms in 20 slices -> MISSED
-  loose: promised 300 ms, took 4 ms in 4 slices -> kept
+  tight: promised 12 ms, took 28 ms in 21 slices -> MISSED
+  loose: promised 300 ms, took 5 ms in 5 slices -> kept
   order started: edge -> tight -> loose
   order finished: edge -> loose -> tight
-  timer ticks: 30, context switches: 26, decisions by deadline: 3
+  timer ticks: 32, context switches: 28, decisions by deadline: 3
   PASS cancel: a task that missed is stopped, not just counted
   PASS cancel: it was dropped close to its deadline, not after finishing
   PASS cancel: the outcome was published as a generation
@@ -152,11 +152,23 @@ image restored from disk: generation 1
 
 [9] what the machine is made of
   generations 8 (root 9, parent index 6), capabilities 1
-  cons cells 32674, symbols 34, closures 11, code blocks 16, constants 53
+  cons cells 32668, symbols 34, closures 11, code blocks 16, constants 53
+
+[10] a guest: a static Linux-ABI ELF in U-mode
+  elf: 2 segments, 123 bytes, entry 2214592512
+  PASS the guest ELF parses: RISC-V, ET_EXEC, segments inside the window
+hello from a Linux ELF, served by eikon
+second syscall, same context
+  PASS the guest ran in U-mode and its output went through write(2)
+  PASS the guest's exit code came back to the kernel
+  PASS every syscall was served by the kernel
+  PASS the guest's run is published as a generation
+  root now: (guest syscalls 3 exit 7 elf 5696)
+
 
 === PASS (failures: 0) ===
 
-root is generation 9
+root is generation 10
 
 eikon repl. type forms; (quit) leaves.
-> qemu-system-riscv64: terminating on signal 15 from pid 25434 (timeout)
+> qemu-system-riscv64: terminating on signal 15 from pid 17474 (timeout)

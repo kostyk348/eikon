@@ -21,6 +21,7 @@ mod eval;
 mod sched;
 mod store;
 mod trap;
+mod user;
 mod virtio;
 mod image;
 mod print;
@@ -588,6 +589,69 @@ fn checks(k: &Kernel) -> u32 {
     serial::write_num(k.ncodes() as i64);
     serial::write_str(", constants ");
     serial::write_num(k.nconsts() as i64);
+    serial::write_str("\n");
+
+    serial::write_str("\n[10] a guest: a static Linux-ABI ELF in U-mode\n");
+    let elf: &[u8] = include_bytes!("../assets/hello.elf");
+    match user::load(elf) {
+        Ok(l) => {
+            serial::write_str("  elf: ");
+            serial::write_num(l.segments as i64);
+            serial::write_str(" segments, ");
+            serial::write_num(l.bytes as i64);
+            serial::write_str(" bytes, entry ");
+            serial::write_num(l.entry as i64);
+            serial::write_str("\n");
+            c.check(
+                "the guest ELF parses: RISC-V, ET_EXEC, segments inside the window",
+                l.segments > 0 && l.entry == 0x8400_0000,
+            );
+        }
+        Err(e) => {
+            serial::write_str("  elf rejected: ");
+            serial::write_str(e);
+            serial::write_str("\n");
+            c.check("the guest ELF parses", false);
+        }
+    }
+    let gen0 = k.img.generation();
+    match user::run(k, elf) {
+        Ok((code, wrote)) => {
+            c.check(
+                "the guest ran in U-mode and its output went through write(2)",
+                wrote == 69,
+            );
+            c.check("the guest's exit code came back to the kernel", code == 7);
+            c.check("every syscall was served by the kernel", user::syscalls() == 3);
+        }
+        Err(e) => {
+            serial::write_str("  guest could not start: ");
+            serial::write_str(e);
+            serial::write_str("\n");
+            c.check("the guest ran", false);
+        }
+    }
+    // the guest's run becomes a value, like everything else here
+    {
+        let tag = k.heap.intern("guest").unwrap_or(0);
+        let k_elf = k.heap.intern("elf").unwrap_or(0);
+        let k_exit = k.heap.intern("exit").unwrap_or(0);
+        let k_calls = k.heap.intern("syscalls").unwrap_or(0);
+        let a = k.heap.cons(Val::Int(elf.len() as i64), NIL).unwrap_or(NIL);
+        let a = k.heap.cons(Val::Sym(k_elf), a).unwrap_or(NIL);
+        let b = k.heap.cons(Val::Int(user::last_exit()), a).unwrap_or(NIL);
+        let b = k.heap.cons(Val::Sym(k_exit), b).unwrap_or(NIL);
+        let c2 = k.heap.cons(Val::Int(user::syscalls() as i64), b).unwrap_or(NIL);
+        let c2 = k.heap.cons(Val::Sym(k_calls), c2).unwrap_or(NIL);
+        let form = k.heap.cons(Val::Sym(tag), c2).unwrap_or(NIL);
+        let _ = k.img.commit(form);
+    }
+    c.check(
+        "the guest's run is published as a generation",
+        k.img.generation() == gen0 + 1,
+    );
+    serial::write_str("  root now: ");
+    let _ = eval_str(k, "(print (root))");
     serial::write_str("\n");
 
     c.failed

@@ -68,10 +68,21 @@ image restored from disk: generation 1
   generations 5 (root 6, parent index 3), capabilities 1
   cons cells 29211, symbols 23, closures 9, code blocks 16, constants 53
 
+[10] a guest: a static Linux-ABI ELF in U-mode
+  elf: 2 segments, 123 bytes, entry 2214592512
+  PASS the guest ELF parses: RISC-V, ET_EXEC, segments inside the window
+hello from a Linux ELF, served by eikon
+second syscall, same context
+  PASS the guest ran in U-mode and its output went through write(2)
+  PASS the guest's exit code came back to the kernel
+  PASS every syscall was served by the kernel
+  PASS the guest's run is published as a generation
+  root now: (guest syscalls 3 exit 7 elf 5696)
+
 === PASS (failures: 0) ===
 ```
 
-40 проверок, все зелёные: [`docs/boot-log.txt`](docs/boot-log.txt). Гейт одной командой: `tools/check.sh`
+45 проверок, все зелёные: [`docs/boot-log.txt`](docs/boot-log.txt). Гейт одной командой: `tools/check.sh`
 (собирает, загружает, падает, если самопроверка не прошла).
 
 ## Что уже работает
@@ -88,6 +99,7 @@ image restored from disk: generation 1
 | **Вытеснение** | у каждой задачи свой стек (1 МиБ), переключение контекста — это просто другой указатель стека; тик забирает процессор каждую миллисекунду |
 | **EDF** | выбор по ближайшему дедлайну, а не по очереди; задача, которая уже не успевает, уступает той, что ещё может успеть |
 | **Срыв как решение** | `(policy 'keep\|'cancel\|'retry)`: опоздавшую можно остановить, дать второй бюджет (×8) или оставить доигрывать |
+| **Гость** | настоящий статический RISC-V ELF в U-mode: `write(2)`, `exit(2)` и ещё три вызова по номерам Linux; выход и вывод возвращаются в ядро |
 | **Срыв как значение** | после каждого прогона публикуется поколение `(report (t <i> <вердикт> <обещано> <заняло> <срезов>) …)` — срыв видно снаружи, как всё остальное |
 | **Контракты** | `(spawn "имя" deadline-ms fn)` + `(sched-run)`: обещанное против фактического, нарушение считается и называется |
 
@@ -148,12 +160,20 @@ src/store.rs     образ на диске: печать формы в сект
 src/virtio.rs    virtio-mmio block: legacy и modern, опросом, без прерываний
 src/sched.rs     контракты: EDF, замер обещания, счётчик нарушений
 src/serial.rs    16550 UART: единственный драйвер ввода-вывода
+src/user.rs      гость: ELF-загрузчик, вход в U-mode, обслуживание syscall'ов
+user/hello/      сам гость: no_std-бинарь, syscall'ы по номерам Linux
+assets/hello.elf его ELF, вшитый в ядро через include_bytes!
 src/main.rs      загрузка, самопроверка, REPL
 ```
 
 ## Чего здесь нет (честно)
 
 - **MMU и адресных пространств**: адреса физические, изоляции процессов нет.
+- **Изоляции гостя**: MMU нет, поэтому «гость не достанет ядро» — это про загрузчик, который ничего туда
+  не положил, а не про железо. Гость также бежит без вытеснения: сохранение *пользовательского* контекста
+  в кадр задачи — отдельная работа, и делать её наполовину было бы враньём.
+- **Полного ABI**: обслужены `write`, `exit`, `exit_group`, `brk`, `set_tid_address`, `getuid`; нет
+  `mmap`, файлов, `futex`, сигналов, динамического линкера.
 - **Политика на задачу**: `policy` — общий переключатель машины, а не атрибут `(spawn …)`; отменённая
   задача теряет свою работу целиком (контрольных точек нет), а повтор — это второй прогон с нуля.
 - **Блокировок между задачами**: общее состояние (куча, образ) защищено только выключением прерываний на

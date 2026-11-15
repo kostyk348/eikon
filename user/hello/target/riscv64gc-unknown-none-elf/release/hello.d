@@ -1,0 +1,1 @@
+/home/lain/.hermes/profiles/libraressa/workspace/repos/eikon/user/hello/target/riscv64gc-unknown-none-elf/release/hello: /home/lain/.hermes/profiles/libraressa/workspace/repos/eikon/user/hello/src/main.rs

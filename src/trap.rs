@@ -263,6 +263,24 @@ pub static mut SWITCH: Option<fn(u64) -> u64> = None;
 #[no_mangle]
 pub extern "C" fn trap_handler(sp: u64) -> u64 {
     let cause = read_scause();
+
+    // A guest lives in U-mode: its `ecall` is a syscall we agreed to serve, and
+    // any other exception is its death - not the kernel's.
+    if crate::user::entering() {
+        crate::user::save_kernel_frame(sp);
+        return crate::user::enter_guest();
+    }
+
+    if crate::user::running() {
+        if cause == 8 {
+            return crate::user::syscall(sp);
+        }
+        if cause & (1 << 63) != 0 {
+            arm_timer(crate::sched::TICK);
+            return sp;
+        }
+        return crate::user::fault(sp, cause);
+    }
     // interrupt = high bit; supervisor timer = 5; S-mode ecall = 9
     if cause & (1 << 63) != 0 {
         let irq = cause & 0xff;
