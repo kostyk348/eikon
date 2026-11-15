@@ -6,4 +6,4 @@ cargo build --release --offline
 exec qemu-system-riscv64 \
     -machine virt -cpu rv64 -bios default \
     -kernel target/riscv64gc-unknown-none-elf/release/eikon \
-    -nographic -smp 1 -m 128M
+    -nographic -monitor none -serial stdio -smp 1 -m 128M

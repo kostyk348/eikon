@@ -322,6 +322,82 @@ fn list2(k: &mut Kernel, a: Val, b: Val) -> Val {
     }
 }
 
+const REPL_BUF: usize = 512;
+
+/// The shell is not a separate program: it reads a line, reads forms out of it,
+/// evaluates them, prints the form back. Same reader, same printer, same
+/// evaluator as the boot image - that is what "the language is the interface"
+/// means in practice.
+fn repl(k: &mut Kernel) -> ! {
+    static mut SOURCE: [u8; REPL_BUF] = [0; REPL_BUF];
+    // The input line lives on the stack; the heap's symbols are &'static str, so
+    // the text handed to the reader lives in one static region, written only
+    // between evaluations.
+    let mut line = [0u8; REPL_BUF];
+    let mut len = 0usize;
+
+    serial::write_str("\neikon repl. type forms; (quit) leaves.\n> ");
+    loop {
+        match serial::try_read() {
+            Some(b'\r') | Some(b'\n') => {
+                serial::write_str("\n");
+                if len > 0 {
+                    let src: &'static mut [u8; REPL_BUF] =
+                        unsafe { &mut *core::ptr::addr_of_mut!(SOURCE) };
+                    let mut i = 0;
+                    while i < len {
+                        src[i] = line[i];
+                        i += 1;
+                    }
+                    let text: &'static str = unsafe { core::str::from_utf8_unchecked(&src[..len]) };
+                    if text.trim() == "(quit)" {
+                        serial::write_str("bye. root is generation ");
+                        serial::write_num(k.img.generation() as i64);
+                        serial::write_str("\n");
+                        loop {
+                            core::hint::spin_loop();
+                        }
+                    }
+                    match eval_str(k, text) {
+                        Ok(v) => {
+                            serial::write_str("=> ");
+                            let mut buf = print::Buf::new();
+                            match print::to_buf(&k.heap, v, &mut buf) {
+                                Ok(t) => serial::write_str(t),
+                                Err(e) => serial::write_str(e),
+                            }
+                            serial::write_str("\n");
+                        }
+                        Err(e) => {
+                            serial::write_str("! ");
+                            serial::write_str(e);
+                            serial::write_str("\n");
+                        }
+                    }
+                    len = 0;
+                }
+                serial::write_str("> ");
+            }
+            Some(b'\x08') | Some(b'\x7f') => {
+                if len > 0 {
+                    len -= 1;
+                    serial::write_str("\u{8} \u{8}");
+                }
+            }
+            Some(b) => {
+                if len < REPL_BUF - 1 {
+                    line[len] = b;
+                    len += 1;
+                    serial::write_byte(b); // echo
+                }
+            }
+            // Busy poll on purpose: `wfi` with no enabled interrupt parks the
+            // hart forever, and the REPL would never wake up to read again.
+            None => core::hint::spin_loop(),
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn kernel_main(hartid: usize, _dtb: usize) -> ! {
     serial::init();
@@ -344,10 +420,8 @@ pub extern "C" fn kernel_main(hartid: usize, _dtb: usize) -> ! {
     serial::write_str(" (failures: ");
     serial::write_num(failed as i64);
     serial::write_str(") ===\n\n");
-    serial::write_str("halted. root is generation ");
+    serial::write_str("root is generation ");
     serial::write_num(k.img.generation() as i64);
     serial::write_str("\n");
-    loop {
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
-    }
+    repl(k)
 }

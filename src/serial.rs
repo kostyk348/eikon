@@ -48,6 +48,16 @@ pub fn write_num(n: i64) {
     write_str(crate::print::int_str(n));
 }
 
+/// Non-blocking read: is there a byte? The REPL must not spin on a queue.
+pub fn try_read() -> Option<u8> {
+    unsafe {
+        if core::ptr::read_volatile(reg(5)) & 0x01 == 0 {
+            return None;
+        }
+        Some(core::ptr::read_volatile(reg(0)))
+    }
+}
+
 /// RISC-V `time` CSR: ticks at 10 MHz on qemu virt, i.e. 100 ns each.
 pub fn ticks() -> u64 {
     let t: u64;
