@@ -12,7 +12,7 @@ use crate::image::Kernel;
 use crate::print::Buf;
 use crate::val::{Val, NIL};
 
-pub fn eval(k: &mut Kernel, env: Val, form: Val) -> Result<Val, &'static str> {
+pub fn eval(k: &Kernel, env: Val, form: Val) -> Result<Val, &'static str> {
     match form {
         Val::Nil | Val::Int(_) | Val::Str(_) | Val::Cap(_) | Val::Clos(_) => Ok(form),
         Val::Sym(_) => lookup(k, env, form),
@@ -96,8 +96,8 @@ pub fn eval(k: &mut Kernel, env: Val, form: Val) -> Result<Val, &'static str> {
                         // the generations that were published.
                         let mut out = NIL;
                         let mut i = 0;
-                        while i < k.img.n {
-                            let id = k.img.gens[i].id as i64;
+                        while i < k.img.count() {
+                            let id = k.img.gen_at(i).id as i64;
                             out = k.heap.cons(Val::Int(id), out)?;
                             i += 1;
                         }
@@ -159,7 +159,7 @@ pub fn eval(k: &mut Kernel, env: Val, form: Val) -> Result<Val, &'static str> {
     }
 }
 
-fn eval_body(k: &mut Kernel, env: Val, mut body: Val) -> Result<Val, &'static str> {
+fn eval_body(k: &Kernel, env: Val, mut body: Val) -> Result<Val, &'static str> {
     let mut last = NIL;
     while let Val::Cons(_) = body {
         last = eval(k, env, k.heap.car(body)?)?;
@@ -186,9 +186,9 @@ pub fn lookup(k: &Kernel, mut env: Val, sym: Val) -> Result<Val, &'static str> {
         _ => return Err("EINVAL: lookup of a non-symbol"),
     };
     while let Val::Cons(i) = env {
-        let (binding, rest) = k.heap.cells[i as usize];
+        let (binding, rest) = k.heap.cell(i).ok_or("EINVAL: dangling cell")?;
         if let Val::Cons(j) = binding {
-            let (key, val) = k.heap.cells[j as usize];
+            let (key, val) = k.heap.cell(j).ok_or("EINVAL: dangling cell")?;
             if let Val::Sym(s) = key {
                 if k.heap.sym_name(s) == name {
                     return Ok(val);
@@ -206,7 +206,7 @@ pub fn lookup(k: &Kernel, mut env: Val, sym: Val) -> Result<Val, &'static str> {
     Err("EUNBOUND: symbol has no value")
 }
 
-pub fn apply(k: &mut Kernel, f: Val, args: &[Val]) -> Result<Val, &'static str> {
+pub fn apply(k: &Kernel, f: Val, args: &[Val]) -> Result<Val, &'static str> {
     match f {
         Val::Clos(c) => {
             let (params, body, closure_env, _code) = k.heap.closure(c);
@@ -230,7 +230,7 @@ pub fn apply(k: &mut Kernel, f: Val, args: &[Val]) -> Result<Val, &'static str> 
     }
 }
 
-fn prim(k: &mut Kernel, name: &'static str, args: &[Val]) -> Result<Val, &'static str> {
+fn prim(k: &Kernel, name: &'static str, args: &[Val]) -> Result<Val, &'static str> {
     match name {
         // image operations as ordinary primitives, so a compiled program and an
         // interpreted program see exactly the same functions
@@ -260,7 +260,7 @@ fn prim(k: &mut Kernel, name: &'static str, args: &[Val]) -> Result<Val, &'stati
                 return Err("EINVAL: (spawn name deadline-ms fn)");
             }
             let name: &'static str = match args[0] {
-                Val::Str(i) => k.heap.strs[i as usize],
+                Val::Str(i) => k.heap.str_of(i),
                 Val::Sym(s) => k.heap.sym_name(s),
                 _ => return Err("EINVAL: task name must be a string or symbol"),
             };
@@ -268,21 +268,15 @@ fn prim(k: &mut Kernel, name: &'static str, args: &[Val]) -> Result<Val, &'stati
                 Val::Int(ms) if ms >= 0 => ms as u64,
                 _ => return Err("EINVAL: deadline must be a non-negative integer (ms)"),
             };
-            Ok(Val::Int(k.sched.spawn(name, deadline, args[2])? as i64))
+            Ok(Val::Int(crate::sched::sched().spawn(name, deadline, args[2])? as i64))
         }
         "sched-run" => {
-            // the scheduler needs &mut Kernel (to call the tasks) while it is a
-            // field of it: move it out for the run and put it back
-            let mut sched = core::mem::replace(&mut k.sched, crate::sched::Sched::new());
-            let res = sched.run_all(k);
-            let misses = sched.misses;
-            let runs = sched.runs;
-            k.sched = core::mem::replace(&mut sched, crate::sched::Sched::new());
-            k.sched.runs = runs;
-            res?;
-            Ok(Val::Int(misses as i64))
+            // preemptive run: the timer takes the CPU away, the trampoline
+            // saves each task's frame on its own stack
+            crate::sched::start();
+            Ok(Val::Int(crate::sched::sched().misses as i64))
         }
-        "misses" => Ok(Val::Int(k.sched.misses as i64)),
+        "misses" => Ok(Val::Int(crate::sched::sched().misses as i64)),
         "save" => Ok(Val::Int(crate::store::save(k)? as i64)),
         "load" => match crate::store::load(k)? {
             Some(g) => Ok(Val::Int(g as i64)),

@@ -22,7 +22,7 @@ fn source() -> &'static mut [u8; MAX_IMAGE] {
 }
 
 /// Print the current root and write it to the disk. Returns the byte count.
-pub fn save(k: &mut Kernel) -> Result<u64, &'static str> {
+pub fn save(k: &Kernel) -> Result<u64, &'static str> {
     if !k.blk.ok {
         return Err("ENODEV: no block device (start qemu with a virtio-blk disk)");
     }
@@ -60,7 +60,7 @@ pub fn save(k: &mut Kernel) -> Result<u64, &'static str> {
 
 /// Read the image back and publish it as a new generation. Returns the
 /// generation it restored, or None when the disk holds no image.
-pub fn load(k: &mut Kernel) -> Result<Option<u64>, &'static str> {
+pub fn load(k: &Kernel) -> Result<Option<u64>, &'static str> {
     if !k.blk.ok {
         return Ok(None);
     }
@@ -92,7 +92,7 @@ pub fn load(k: &mut Kernel) -> Result<Option<u64>, &'static str> {
     let text: &'static str = unsafe { core::str::from_utf8_unchecked(&src[..len]) };
 
     let mut r = crate::read::Reader::new(text);
-    let forms = r.all(&mut k.heap)?;
+    let forms = r.all(&k.heap)?;
     let form = k.heap.car(forms)?;
     let gen = k.img.commit(form)?;
     Ok(Some(gen))

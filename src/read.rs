@@ -76,7 +76,7 @@ impl Reader {
 
     /// One form. `'` is sugar for `(quote ...)`, so quoted data needs no special
     /// node type: a quote is an ordinary form, like everything else.
-    pub fn parse(&mut self, h: &mut Heap) -> Result<Val, &'static str> {
+    pub fn parse(&mut self, h: &Heap) -> Result<Val, &'static str> {
         self.skip_ws();
         if self.i >= self.bytes().len() {
             return Err("EOF");
@@ -161,7 +161,7 @@ impl Reader {
     }
 
     /// Everything in the source, as one list of forms: the program is a value.
-    pub fn all(&mut self, h: &mut Heap) -> Result<Val, &'static str> {
+    pub fn all(&mut self, h: &Heap) -> Result<Val, &'static str> {
         let mut items: [Val; 128] = [Val::Nil; 128];
         let mut n = 0;
         while !self.at_end() {

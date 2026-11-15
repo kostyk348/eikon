@@ -20,6 +20,7 @@ mod bytecode;
 mod eval;
 mod sched;
 mod store;
+mod trap;
 mod virtio;
 mod image;
 mod print;
@@ -43,7 +44,7 @@ const BOOT_IMAGE: &str = r#"
 base
 "#;
 
-static mut KERNEL: Kernel = Kernel::new();
+pub static mut KERNEL: Kernel = Kernel::new();
 static mut ROUNDTRIP: [u8; 4096] = [0; 4096];
 
 core::arch::global_asm!(
@@ -68,6 +69,10 @@ _start:
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     serial::write_str("\nPANIC: ");
+    if let Some(m) = info.message().as_str() {
+        serial::write_str(m);
+        serial::write_str(" at ");
+    }
     if let Some(l) = info.location() {
         serial::write_str(l.file());
         serial::write_str(":");
@@ -77,14 +82,14 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-fn sym(k: &mut Kernel, s: &'static str) -> Val {
+fn sym(k: &Kernel, s: &'static str) -> Val {
     Val::Sym(k.heap.intern(s).unwrap_or(0))
 }
 
 /// Read and evaluate a source string in the global environment.
-fn eval_str(k: &mut Kernel, src: &'static str) -> Result<Val, &'static str> {
+fn eval_str(k: &Kernel, src: &'static str) -> Result<Val, &'static str> {
     let mut r = read::Reader::new(src);
-    let mut forms = r.all(&mut k.heap)?;
+    let mut forms = r.all(&k.heap)?;
     let mut last = NIL;
     while let Val::Cons(_) = forms {
         last = eval::eval(k, NIL, k.heap.car(forms)?)?;
@@ -99,7 +104,7 @@ fn is_int(v: Val, n: i64) -> bool {
 
 /// Structural equality over the printed image: one spelling per value means the
 /// text is the canonical form, so comparing text is comparing values.
-fn same(k: &mut Kernel, a: Val, b: Val) -> bool {
+fn same(k: &Kernel, a: Val, b: Val) -> bool {
     let mut ba = print::Buf::new();
     let mut bb = print::Buf::new();
     let sa = match print::to_buf(&k.heap, a, &mut ba) {
@@ -128,12 +133,12 @@ impl Checker {
     }
 }
 
-fn checks(k: &mut Kernel) -> u32 {
+fn checks(k: &Kernel) -> u32 {
     let mut c = Checker { failed: 0 };
 
     serial::write_str("\n[1] the image is text, and text is the image\n");
     let mut src = read::Reader::new(BOOT_IMAGE);
-    let forms = match src.all(&mut k.heap) {
+    let forms = match src.all(&k.heap) {
         Ok(f) => f,
         Err(e) => {
             serial::write_str("  reader failed: ");
@@ -174,7 +179,7 @@ fn checks(k: &mut Kernel) -> u32 {
     let rt: &'static [u8; 4096] = unsafe { &*core::ptr::addr_of!(ROUNDTRIP) };
     let printed_static: &'static str = unsafe { core::str::from_utf8_unchecked(&rt[..n]) };
     let mut again = read::Reader::new(printed_static);
-    let reparsed = again.all(&mut k.heap).unwrap_or(Val::Int(-1));
+    let reparsed = again.all(&k.heap).unwrap_or(Val::Int(-1));
     let reparsed_one = k.heap.car(reparsed).unwrap_or(NIL);
     c.check("print -> read yields the same form", same(k, forms, reparsed_one));
 
@@ -389,7 +394,7 @@ fn checks(k: &mut Kernel) -> u32 {
                         c.check("the image reads back and parses", true);
                         c.check(
                             "what came back is what was saved",
-                            same(k, k.img.root(), k.img.gens[k.img.n - 2].root),
+                            same(k, k.img.root(), k.img.gen_at(k.img.count() - 2).root),
                         );
                         let _ = before;
                     }
@@ -411,72 +416,77 @@ fn checks(k: &mut Kernel) -> u32 {
         }
     }
 
-    serial::write_str("\n[8] contracts: what was promised against what it cost\n");
+    serial::write_str("\n[8] preemption: the timer takes the CPU away\n");
     let spawned = eval_str(
         k,
-        r#"(spawn "miss" 1 (lambda () (fib 14)))
-(spawn "fit" 200 (lambda () (fib 10)))
-(spawn "wide" 5000 (lambda () (fib 12)))"#,
+        r#"(spawn "long" 5 (lambda () (fib 17)))
+(spawn "short" 1000 (lambda () (fib 8)))"#,
     );
-    c.check("three tasks spawned", spawned.is_ok() && k.sched.n == 3);
-    let misses = eval_str(k, "(sched-run)");
-    c.check("the queue runs without error", misses.is_ok());
-    let order = k.sched.order();
+    c.check("two tasks spawned, each with its own stack", spawned.is_ok() && sched::sched().n == 2);
+    let ran = eval_str(k, "(sched-run)");
+    c.check("the preemptive run finished without error", ran.is_ok() && !sched::sched().failed);
+    c.check("no task stack ran into the scheduler (.bss canary intact)", sched::stacks_intact());
+    let s = sched::sched();
+    c.check("the timer fired and the tasks were interrupted", s.ticks > 0);
+    c.check("both tasks ran to completion", s.tasks[0].finished && s.tasks[1].finished);
     c.check(
-        "earliest deadline runs first",
-        order[0] != usize::MAX && k.sched.tasks[order[0]].deadline_ms == 1,
-    );
-    c.check(
-        "a task that keeps its promise is not blamed",
-        !k.sched.tasks[1].missed && k.sched.tasks[2].missed == false,
+        "the long task was preempted more than once",
+        s.tasks[0].slices > 1 && s.preemptions > 1,
     );
     c.check(
-        "a broken promise is counted",
-        k.sched.tasks[0].missed && k.sched.misses == 1,
+        "a broken promise is counted: both kept and missed appear",
+        s.tasks[0].missed && !s.tasks[1].missed && s.misses == 1,
     );
     let mut i = 0;
-    while i < k.sched.n {
-        let t = k.sched.tasks[i];
+    while i < s.n {
+        let t = s.tasks[i];
         serial::write_str("  ");
-        serial::write_str(t.name);
+        serial::write_str(t.name());
         serial::write_str(": promised ");
         serial::write_num(t.deadline_ms as i64);
         serial::write_str(" ms, took ");
         serial::write_num(t.took_ms as i64);
-        serial::write_str(" ms -> ");
+        serial::write_str(" ms in ");
+        serial::write_num(t.slices as i64);
+        serial::write_str(" slices -> ");
         serial::write_str(if t.missed { "MISSED" } else { "kept" });
         serial::write_str("\n");
         i += 1;
     }
+    serial::write_str("  timer ticks: ");
+    serial::write_num(s.ticks as i64);
+    serial::write_str(", context switches: ");
+    serial::write_num(s.preemptions as i64);
+    serial::write_str("\n");
 
     serial::write_str("\n[9] what the machine is made of\n");
     serial::write_str("  generations ");
-    serial::write_num(k.img.n as i64);
+    serial::write_num(k.img.count() as i64);
     serial::write_str(" (root ");
     serial::write_num(k.img.generation() as i64);
     serial::write_str(", parent index ");
-    serial::write_num(k.img.gens[k.img.n - 1].parent);
+    serial::write_num(k.img.gen_at(k.img.count() - 1).parent);
     serial::write_str("), capabilities ");
-    serial::write_num(k.img.ncaps as i64);
+    serial::write_num(k.img.caps_count() as i64);
     serial::write_str("\n  cons cells ");
-    serial::write_num(k.heap.ncells as i64);
+    serial::write_num(k.heap.ncells() as i64);
     serial::write_str(", symbols ");
-    serial::write_num(k.heap.nsyms as i64);
+    serial::write_num(k.heap.nsyms() as i64);
     serial::write_str(", closures ");
-    serial::write_num(k.heap.nclosures as i64);
+    serial::write_num(k.heap.nclosures() as i64);
     serial::write_str(", code blocks ");
-    serial::write_num(k.ncodes as i64);
+    serial::write_num(k.ncodes() as i64);
     serial::write_str(", constants ");
-    serial::write_num(k.nconsts as i64);
+    serial::write_num(k.nconsts() as i64);
     serial::write_str("\n");
 
     c.failed
 }
 
 /// Compile a source string and run it on the VM; compare with the expected int.
-fn compiled_int(k: &mut Kernel, src: &'static str, want: i64) -> bool {
+fn compiled_int(k: &Kernel, src: &'static str, want: i64) -> bool {
     let mut r = read::Reader::new(src);
-    let forms = match r.all(&mut k.heap) {
+    let forms = match r.all(&k.heap) {
         Ok(f) => f,
         Err(_) => return false,
     };
@@ -490,7 +500,7 @@ fn compiled_int(k: &mut Kernel, src: &'static str, want: i64) -> bool {
     }
 }
 
-fn list2(k: &mut Kernel, a: Val, b: Val) -> Val {
+fn list2(k: &Kernel, a: Val, b: Val) -> Val {
     match k.heap.cons(b, NIL) {
         Ok(tail) => match k.heap.cons(a, tail) {
             Ok(v) => v,
@@ -506,7 +516,7 @@ const REPL_BUF: usize = 512;
 /// evaluates them, prints the form back. Same reader, same printer, same
 /// evaluator as the boot image - that is what "the language is the interface"
 /// means in practice.
-fn repl(k: &mut Kernel) -> ! {
+fn repl(k: &Kernel) -> ! {
     static mut SOURCE: [u8; REPL_BUF] = [0; REPL_BUF];
     // The input line lives on the stack; the heap's symbols are &'static str, so
     // the text handed to the reader lives in one static region, written only
@@ -588,9 +598,9 @@ pub extern "C" fn kernel_main(hartid: usize, _dtb: usize) -> ! {
 
     let k = unsafe { &mut *core::ptr::addr_of_mut!(KERNEL) };
     // fixed seed on purpose: the same boot must produce the same image
-    k.img.secret = 0x5eed_1234_abcd_9876 ^ (hartid as u64);
+    k.img.set_secret(0x5eed_1234_abcd_9876 ^ (hartid as u64));
 
-    k.blk = virtio::Blk::init();
+    k.set_blk(virtio::Blk::init());
     if k.blk.ok {
         serial::write_str("virtio-blk: ");
         serial::write_num(k.blk.capacity as i64);

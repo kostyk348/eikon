@@ -13,7 +13,7 @@ pub fn emit(h: &Heap, v: Val, out: &mut dyn FnMut(u8)) -> Result<(), &'static st
         Val::Sym(i) => out_str(out, h.sym_name(i)),
         Val::Str(i) => {
             out(b'"');
-            for b in h.strs[i as usize].as_bytes() {
+            for b in h.str_of(i).as_bytes() {
                 if *b == b'"' || *b == b'\\' {
                     out(b'\\');
                 }
@@ -37,7 +37,7 @@ pub fn emit(h: &Heap, v: Val, out: &mut dyn FnMut(u8)) -> Result<(), &'static st
                 }
                 match cur {
                     Val::Cons(i) => {
-                        let (car, cdr) = h.cells[i as usize];
+                        let (car, cdr) = h.cell(i).ok_or("EINVAL: dangling cell")?;
                         if !first {
                             out(b' ');
                         }

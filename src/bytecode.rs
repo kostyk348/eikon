@@ -52,46 +52,40 @@ impl Code {
 }
 
 struct Emitter<'a> {
-    k: &'a mut Kernel,
+    k: &'a Kernel,
     ci: u16,
 }
 
 impl<'a> Emitter<'a> {
     fn push(&mut self, op: Op) -> Result<usize, &'static str> {
-        let code = &mut self.k.codes[self.ci as usize];
-        if code.n == MAX_OPS {
-            return Err("ENOSPC: code block full");
-        }
-        code.ops[code.n] = op;
-        code.n += 1;
-        Ok(code.n - 1)
+        let idx = self.ci as usize;
+        crate::trap::with_irq_off(|| {
+            let code = unsafe { &mut *self.k.code_ptr(idx) };
+            if code.n == MAX_OPS {
+                return Err("ENOSPC: code block full");
+            }
+            code.ops[code.n] = op;
+            code.n += 1;
+            Ok(code.n - 1)
+        })
     }
 
     fn konst(&mut self, v: Val) -> Result<u16, &'static str> {
-        if self.k.nconsts == MAX_CONSTS {
-            return Err("ENOSPC: constant pool full");
-        }
-        self.k.consts[self.k.nconsts] = v;
-        self.k.nconsts += 1;
-        Ok((self.k.nconsts - 1) as u16)
+        self.k.push_const(v)
     }
 
     fn patch(&mut self, at: usize, op: Op) {
-        self.k.codes[self.ci as usize].ops[at] = op;
+        let idx = self.ci as usize;
+        self.k.code_mut(idx, |c| c.ops[at] = op);
     }
 
     fn here(&self) -> u16 {
-        self.k.codes[self.ci as usize].n as u16
+        self.k.code_len(self.ci as usize) as u16
     }
 
     /// Reserve a new code block, compile `body` into it, return its index.
     fn sub(&mut self, params_len: u8, body: Val) -> Result<u16, &'static str> {
-        if self.k.ncodes == MAX_CODES {
-            return Err("ENOSPC: code table full");
-        }
-        let idx = self.k.ncodes as u16;
-        self.k.ncodes += 1;
-        self.k.codes[idx as usize] = Code { ops: [Op::Return; MAX_OPS], n: 0, arity: params_len };
+        let idx = self.k.alloc_code(Code { ops: [Op::Return; MAX_OPS], n: 0, arity: params_len })?;
         let saved = self.ci;
         self.ci = idx;
         let mut body_cur = body;
@@ -302,13 +296,11 @@ impl<'a> Emitter<'a> {
 }
 
 /// Compile one form into a fresh code block; returns its index.
-pub fn compile(k: &mut Kernel, form: Val) -> Result<u16, &'static str> {
-    if k.ncodes == MAX_CODES {
+pub fn compile(k: &Kernel, form: Val) -> Result<u16, &'static str> {
+    if k.ncodes() == MAX_CODES {
         return Err("ENOSPC: code table full");
     }
-    let idx = k.ncodes as u16;
-    k.ncodes += 1;
-    k.codes[idx as usize] = Code::new();
+    let idx = k.alloc_code(Code::new())?;
     let mut e = Emitter { k, ci: idx };
     e.comp(form)?;
     e.push(Op::Return)?;
@@ -317,27 +309,27 @@ pub fn compile(k: &mut Kernel, form: Val) -> Result<u16, &'static str> {
 
 /// Run a code block. Calls recurse in Rust: correct first, threaded dispatch
 /// later if the benchmark says it matters.
-pub fn run(k: &mut Kernel, ci: u16, env: Val) -> Result<Val, &'static str> {
+pub fn run(k: &Kernel, ci: u16, env: Val) -> Result<Val, &'static str> {
     let mut stack: [Val; 64] = [NIL; 64];
     let mut sp = 0usize;
     let mut ip = 0usize;
-    let arity = k.codes[ci as usize].arity as usize;
+    let arity = k.code_arity(ci as usize) as usize;
     let _ = arity;
     loop {
-        let op = k.codes[ci as usize].ops[ip];
+        let op = k.op(ci as usize, ip);
         ip += 1;
         match op {
             Op::Const(i) => {
-                stack[sp] = k.consts[i as usize];
+                stack[sp] = k.constant(i as usize);
                 sp += 1;
             }
             Op::Load(i) => {
-                let name = k.consts[i as usize];
+                let name = k.constant(i as usize);
                 stack[sp] = crate::eval::lookup(k, env, name)?;
                 sp += 1;
             }
             Op::Def(i) => {
-                let name = k.consts[i as usize];
+                let name = k.constant(i as usize);
                 let v = stack[sp - 1];
                 if let Val::Sym(s) = name {
                     k.heap.set_global(k.heap.sym_name(s), v);
@@ -394,8 +386,8 @@ pub fn run(k: &mut Kernel, ci: u16, env: Val) -> Result<Val, &'static str> {
                 // The closure keeps the whole current environment: no free
                 // variable analysis, no sugar, just a pointer. It also carries
                 // the source forms, so the tree-walker can call it too.
-                let params = k.consts[pi as usize];
-                let body = k.consts[bi as usize];
+                let params = k.constant(pi as usize);
+                let body = k.constant(bi as usize);
                 stack[sp] = k.heap.mk_closure(params, body, env, ci2 as i64)?;
                 sp += 1;
             }

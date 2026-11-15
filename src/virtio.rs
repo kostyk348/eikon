@@ -67,7 +67,8 @@ pub struct Blk {
     base: usize,
     pub ok: bool,
     pub capacity: u64,
-    last_used: u16,
+    /// The used-ring index is shared mutable state under preemption.
+    last_used: core::cell::Cell<u16>,
 }
 
 unsafe fn rd(base: usize, off: usize) -> u32 {
@@ -84,7 +85,7 @@ fn qmem() -> &'static mut QMem {
 
 impl Blk {
     pub const fn none() -> Self {
-        Blk { base: 0, ok: false, capacity: 0, last_used: 0 }
+        Blk { base: 0, ok: false, capacity: 0, last_used: core::cell::Cell::new(0) }
     }
 
     /// What the kernel sees in the virtio-mmio slots. Printed only when the
@@ -175,7 +176,7 @@ impl Blk {
             // capacity in sectors lives in the device-specific config space
             let cap_lo = rd(base, 0x100) as u64;
             let cap_hi = rd(base, 0x104) as u64;
-            Some(Blk { base, ok: true, capacity: cap_lo | (cap_hi << 32), last_used: 0 })
+            Some(Blk { base, ok: true, capacity: cap_lo | (cap_hi << 32), last_used: core::cell::Cell::new(0) })
         }
     }
 
@@ -189,7 +190,7 @@ impl Blk {
     }
 
     /// One request: 1 = device->memory, 0 = memory->device.
-    fn request(&mut self, write_to_host: bool, sector: u64, nbytes: u32) -> Result<(), &'static str> {
+    fn request(&self, write_to_host: bool, sector: u64, nbytes: u32) -> Result<(), &'static str> {
         if !self.ok {
             return Err("ENODEV: no block device");
         }
@@ -232,8 +233,8 @@ impl Blk {
             let lo = unsafe { core::ptr::read_volatile(up) } as u16;
             let hi = unsafe { core::ptr::read_volatile(up.add(1)) } as u16;
             let used = lo | (hi << 8);
-            if used != self.last_used {
-                self.last_used = used;
+            if used != self.last_used.get() {
+                self.last_used.set(used);
                 break;
             }
             spins += 1;
@@ -265,14 +266,14 @@ impl Blk {
         }
     }
 
-    pub fn read_sector(&mut self, sector: u64, out: &mut [u8; SECTOR]) -> Result<(), &'static str> {
+    pub fn read_sector(&self, sector: u64, out: &mut [u8; SECTOR]) -> Result<(), &'static str> {
         self.request(true, sector, SECTOR as u32)?;
         let q = qmem();
         out.copy_from_slice(&q.bytes[DATA_OFF..DATA_OFF + SECTOR]);
         Ok(())
     }
 
-    pub fn write_sector(&mut self, sector: u64, data: &[u8; SECTOR]) -> Result<(), &'static str> {
+    pub fn write_sector(&self, sector: u64, data: &[u8; SECTOR]) -> Result<(), &'static str> {
         let q = qmem();
         q.bytes[DATA_OFF..DATA_OFF + SECTOR].copy_from_slice(data);
         self.request(false, sector, SECTOR as u32)

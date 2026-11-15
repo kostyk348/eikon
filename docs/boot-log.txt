@@ -106,16 +106,16 @@ image restored from disk: generation 1
   PASS a forged handle is refused
 
 [6] speed: tree-walk against bytecode, same forms
-  control: one (fib 12) without rewind: 2023 us (correct)
+  control: one (fib 12) without rewind: 1270 us (correct)
   PASS tree-walk (fib 12) = 144
   PASS bytecode (fib 12) = 144
   (fib 12) x50 = 23k calls
-    tree-walk : 90 ms, 257964 calls/s
-    bytecode  : 35 ms, 657701 calls/s
+    tree-walk : 62 ms, 372079 calls/s
+    bytecode  : 26 ms, 884538 calls/s
   (+ 1 2) x20000
-    tree-walk : 1664322 forms/s
-    bytecode  : 1794558 forms/s
-  ratio: 107% of the tree-walk time
+    tree-walk : 2573704 forms/s
+    bytecode  : 2868493 forms/s
+  ratio: 111% of the tree-walk time
   PASS bytecode is faster on call-heavy code
   PASS bytecode stays within 20% on a one-form workload
 
@@ -125,23 +125,25 @@ image restored from disk: generation 1
   PASS the image reads back and parses
   PASS what came back is what was saved
 
-[8] contracts: what was promised against what it cost
-  PASS three tasks spawned
-  PASS the queue runs without error
-  PASS earliest deadline runs first
-  PASS a task that keeps its promise is not blamed
-  PASS a broken promise is counted
-  miss: promised 1 ms, took 4 ms -> MISSED
-  fit: promised 200 ms, took 0 ms -> kept
-  wide: promised 5000 ms, took 3 ms -> kept
+[8] preemption: the timer takes the CPU away
+  PASS two tasks spawned, each with its own stack
+  PASS the preemptive run finished without error
+  PASS no task stack ran into the scheduler (.bss canary intact)
+  PASS the timer fired and the tasks were interrupted
+  PASS both tasks ran to completion
+  PASS the long task was preempted more than once
+  PASS a broken promise is counted: both kept and missed appear
+  long: promised 5 ms, took 16 ms in 14 slices -> MISSED
+  short: promised 1000 ms, took 0 ms in 0 slices -> kept
+  timer ticks: 17, context switches: 14
 
 [9] what the machine is made of
   generations 5 (root 6, parent index 3), capabilities 1
-  cons cells 16221, symbols 23, closures 9, code blocks 16, constants 53
+  cons cells 26679, symbols 23, closures 8, code blocks 16, constants 53
 
 === PASS (failures: 0) ===
 
 root is generation 6
 
 eikon repl. type forms; (quit) leaves.
-> qemu-system-riscv64: terminating on signal 15 from pid 25416 (timeout)
+> qemu-system-riscv64: terminating on signal 15 from pid 31123 (timeout)
